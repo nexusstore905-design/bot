@@ -13,7 +13,6 @@ from database.database import AsyncSessionLocal
 from database.repositories.user_repo import UserRepository
 from database.repositories.product_repo import ProductRepository
 from database.repositories.order_repo import OrderRepository
-from database.models import OrderStatus
 from bot.middlewares.auth_middleware import require_auth
 from bot.keyboards.customer_kb import (
     main_menu_kb, categories_kb, products_kb, quantity_kb, cart_kb,
@@ -23,7 +22,6 @@ from bot.states.states import (
     ORDER_SELECT_CATEGORY, ORDER_SELECT_PRODUCT, ORDER_SELECT_QUANTITY,
     ORDER_CART_ACTION, ORDER_ENTER_PLAYER_ID, ORDER_CONFIRM,
 )
-from config.settings import STORE_NAME
 from bot.keyboards.admin_kb import supplier_done_error_kb
 from utils.supplier_routing import resolve_supplier_chat
 
@@ -39,10 +37,21 @@ STATUS_DISPLAY = {
 
 
 def _render_cart(cart: list) -> str:
-    text = "<b>🛒 Your Shopping Cart</b>\n\n"
+    text = "🛒 <b>Your cart</b>\n──────────────\n"
     for i, item in enumerate(cart, 1):
-        text += f"  {i}. <b>{html.escape(str(item['product_name']), quote=False)}</b> x{item['quantity']}\n"
+        text += (
+            f"{i}. <b>{html.escape(str(item['product_name']), quote=False)}</b>"
+            f"  × {item['quantity']}\n"
+        )
     return text
+
+
+def _order_step(context: ContextTypes.DEFAULT_TYPE, step: int, title: str, prompt: str) -> str:
+    total = 4 if context.user_data.get("order_has_categories") else 3
+    return (
+        f"🛍 <b>New order</b>  <i>{step}/{total}</i>\n"
+        f"<b>{title}</b>\n\n{prompt}"
+    )
 
 
 async def cb_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -57,6 +66,7 @@ async def cb_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async with AsyncSessionLocal() as session:
         categories = await ProductRepository(session).get_categories()
+    context.user_data["order_has_categories"] = len(categories) > 1
 
     if not categories:
         await update.callback_query.edit_message_text(
@@ -71,20 +81,14 @@ async def cb_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             products = await ProductRepository(session).get_by_category(categories[0])
 
         await update.callback_query.edit_message_text(
-            f"┌──────────────────────────┐\n"
-            f"│  🛒  ADD TO CART            │\n"
-            f"└──────────────────────────┘\n\n"
-            f"<b>Select your package:</b>\n",
+            _order_step(context, 1, "Choose a package", "Select a package to add it to your cart."),
             reply_markup=products_kb(products),
             parse_mode="HTML",
         )
         return ORDER_SELECT_PRODUCT
 
     await update.callback_query.edit_message_text(
-        f"┌──────────────────────────┐\n"
-        f"│  🛒  ADD TO CART            │\n"
-        f"└──────────────────────────┘\n\n"
-        f"<b>Select a category:</b>\n",
+        _order_step(context, 1, "Choose a category", "Select a category to see its available products."),
         reply_markup=categories_kb(categories),
         parse_mode="HTML",
     )
@@ -104,11 +108,12 @@ async def cb_select_category(update: Update, context: ContextTypes.DEFAULT_TYPE)
         products = await ProductRepository(session).get_by_category(category)
 
     await update.callback_query.edit_message_text(
-        f"┌──────────────────────────┐\n"
-        f"│  🛒  ADD TO CART            │\n"
-        f"└──────────────────────────┘\n\n"
-        f"📂  <b>{html.escape(category, quote=False)}</b>\n\n"
-        f"Select your package:",
+        _order_step(
+            context,
+            2,
+            html.escape(category, quote=False),
+            "Choose a package to add it to your cart.",
+        ),
         reply_markup=products_kb(products),
         parse_mode="HTML",
     )
@@ -127,7 +132,11 @@ async def cb_select_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         product = await ProductRepository(session).get_by_id(product_id)
 
     if not product:
-        await update.callback_query.edit_message_text("❌  Product not found.")
+        await update.callback_query.edit_message_text(
+            "❌ <b>This product is no longer available.</b>\n\nPlease start a new order.",
+            parse_mode="HTML",
+            reply_markup=back_to_menu_kb(),
+        )
         return ConversationHandler.END
 
     context.user_data["temp_item"] = {
@@ -137,11 +146,12 @@ async def cb_select_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
 
     await update.callback_query.edit_message_text(
-        f"┌──────────────────────────┐\n"
-        f"│  🛒  ADD TO CART            │\n"
-        f"└──────────────────────────┘\n\n"
-        f"✅  <b>{html.escape(product.name, quote=False)}</b>\n\n"
-        f"How many do you want?",
+        _order_step(
+            context,
+            3 if context.user_data.get("order_has_categories") else 2,
+            html.escape(product.name, quote=False),
+            "Choose how many you want.",
+        ),
         reply_markup=quantity_kb(),
         parse_mode="HTML",
     )
@@ -163,11 +173,8 @@ async def cb_select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE)
     cart_text = _render_cart(context.user_data["cart"])
 
     await update.callback_query.edit_message_text(
-        f"┌──────────────────────────┐\n"
-        f"│  🛒  CART UPDATED           │\n"
-        f"└──────────────────────────┘\n\n"
-        f"{cart_text}\n\n"
-        f"What would you like to do next?",
+        f"{cart_text}\n"
+        "Choose another product or continue to checkout.",
         parse_mode="HTML",
         reply_markup=cart_kb(),
     )
@@ -177,8 +184,11 @@ async def cb_select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def cb_cart_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer("Cart cleared!")
     context.user_data["cart"] = []
+    context.user_data.pop("player_id", None)
+    context.user_data.pop("temp_item", None)
     await update.callback_query.edit_message_text(
-        "🗑  Cart has been cleared.",
+        "🗑 <b>Your cart is empty.</b>\n\nYou can start a new order whenever you're ready.",
+        parse_mode="HTML",
         reply_markup=main_menu_kb(),
     )
     return ConversationHandler.END
@@ -196,11 +206,13 @@ async def cb_cart_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
 
     await update.callback_query.edit_message_text(
-        f"┌──────────────────────────┐\n"
-        f"│  🛒  CHECKOUT               │\n"
-        f"└──────────────────────────┘\n\n"
-        f"📝  <b>Enter your PUBG Player ID:</b>\n\n"
-        f"<i>(Note: IDs must start with 5, e.g. 5123456789)</i>",
+        _order_step(
+            context,
+            4 if context.user_data.get("order_has_categories") else 3,
+            "Enter your PUBG Player ID",
+            "Check the ID carefully before submitting.\n"
+            "<i>It must contain 5–15 digits and start with 5.</i>",
+        ),
         parse_mode="HTML",
     )
     return ORDER_ENTER_PLAYER_ID
@@ -214,9 +226,8 @@ async def msg_enter_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE
     player_id = update.message.text.strip()
     if not player_id.isdigit() or not (5 <= len(player_id) <= 15) or not player_id.startswith("5"):
         await update.message.reply_text(
-            "❌  <b>Invalid Player ID</b>\n\n"
-            "PUBG Player IDs must <b>start with 5</b> and contain only numbers.\n"
-            "Please try again:",
+            "❌ <b>That Player ID does not look right.</b>\n\n"
+            "Enter 5–15 digits starting with 5. Please try again:",
             parse_mode="HTML",
         )
         return ORDER_ENTER_PLAYER_ID
@@ -225,12 +236,10 @@ async def msg_enter_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE
     cart_text = _render_cart(context.user_data["cart"])
 
     await update.message.reply_text(
-        f"┌──────────────────────────┐\n"
-        f"│  🛒  ORDER REVIEW           │\n"
-        f"└──────────────────────────┘\n\n"
-        f"{cart_text}\n\n"
-        f"  🎯  <b>Player ID:</b> <code>{player_id}</code>\n\n"
-        f"Please confirm your order:",
+        "🧾 <b>Review your order</b>\n──────────────\n"
+        f"{cart_text}\n"
+        f"🎮 <b>Player ID</b>  <code>{html.escape(player_id, quote=False)}</code>\n\n"
+        "Check these details, then submit your order.",
         reply_markup=confirm_order_kb(),
         parse_mode="HTML",
     )
@@ -249,7 +258,8 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not cart or not player_id:
         await update.callback_query.edit_message_text(
-            "❌  Session expired or cart is empty. Please start again.",
+            "❌ <b>Your order session expired.</b>\n\nStart a new order from the menu.",
+            parse_mode="HTML",
             reply_markup=back_to_menu_kb()
         )
         return ConversationHandler.END
@@ -261,7 +271,7 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         allowed, reason = await limit_repo.check_and_increment(user.id)
         if not allowed:
             await update.callback_query.edit_message_text(
-                f"🚫  <b>Order Blocked</b>\n\n{reason}",
+                f"🚫 <b>Order limit reached</b>\n\n{html.escape(reason, quote=False)}",
                 parse_mode="HTML",
                 reply_markup=back_to_menu_kb()
             )
@@ -281,17 +291,16 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("player_id", None)
 
     msg_text = (
-        f"┌──────────────────────────┐\n"
-        f"│   ✅  ORDER PLACED!         │\n"
-        f"└──────────────────────────┘\n\n"
-        f"Your order has been sent to our team.\n\n"
-        f"  🆔  Order ID:  <b>{order.order_id}</b>\n"
+        "✅ <b>Order submitted</b>\n"
+        "──────────────\n"
+        "Your order is now waiting for processing.\n\n"
+        f"🧾 <b>Order ID</b>  <code>{html.escape(order.order_id, quote=False)}</code>\n"
     )
     for item in cart:
         msg_text += f"      - {html.escape(str(item['product_name']), quote=False)} x{item['quantity']}\n"
-    msg_text += f"\n  🎯  Player ID: <code>{html.escape(player_id, quote=False)}</code>\n"
-    msg_text += f"  ⏳  Status:    <b>PENDING</b>\n\n"
-    msg_text += f"You will be notified once processed. Thank you! 🙏"
+    msg_text += f"\n🎮 <b>Player ID</b>  <code>{html.escape(player_id, quote=False)}</code>\n"
+    msg_text += "⏳ <b>Status</b>  Pending\n\n"
+    msg_text += "You can check progress with the buttons below."
 
     await update.callback_query.edit_message_text(
         msg_text,
@@ -303,6 +312,24 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _forward_to_suppliers(context, order.order_id, cart, player_id)
 
     return ConversationHandler.END
+
+
+async def cb_edit_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_auth(update, context):
+        await update.callback_query.answer("🔐 Please authenticate first.", show_alert=True)
+        return ConversationHandler.END
+
+    await update.callback_query.answer()
+    await update.callback_query.edit_message_text(
+        _order_step(
+            context,
+            4 if context.user_data.get("order_has_categories") else 3,
+            "Enter your PUBG Player ID",
+            "Send the correct ID below. It must contain 5–15 digits and start with 5.",
+        ),
+        parse_mode="HTML",
+    )
+    return ORDER_ENTER_PLAYER_ID
 
 
 async def _forward_to_suppliers(context, order_id: str, cart_items: list, player_id: str):
@@ -335,14 +362,13 @@ async def _forward_to_suppliers(context, order_id: str, cart_items: list, player
         safe_uid = html.escape(str(player_id))
         safe_cat = html.escape(str(category))
 
-        # Build supplier message
+        # Build a compact order card for the supplier group.
         supplier_text = (
-            f"┌──────────────────────────┐\n"
-            f"│    🆕  NEW ORDER             │\n"
-            f"└──────────────────────────┘\n\n"
-            f"  🆔  Order:     <b>{safe_order_id}</b>\n"
-            f"  🎯  PUBG UID:  <code>{safe_uid}</code>\n\n"
-            f"  📦  <b>Items ({safe_cat}):</b>\n"
+            "🆕 <b>New order</b>\n──────────────\n"
+            f"🧾 <b>Order ID</b>  <code>{safe_order_id}</code>\n"
+            f"📂 <b>Category</b>  {safe_cat}\n"
+            f"🎮 <b>Player ID</b>  <code>{safe_uid}</code>\n\n"
+            "<b>Items</b>\n"
         )
         for item in items:
             safe_pname = html.escape(str(item['product_name']))
@@ -392,15 +418,37 @@ async def _forward_to_suppliers(context, order_id: str, cart_items: list, player
                     pass
 
 
-async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer("Cancelled")
+async def cb_return_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
     context.user_data.pop("cart", None)
     context.user_data.pop("temp_item", None)
-    await update.callback_query.message.reply_text(
-        "✖  <b>Order Cancelled & Cart Cleared</b>\n\nCome back anytime. 😊",
+    context.user_data.pop("player_id", None)
+    context.user_data.pop("temp_cat", None)
+    context.user_data.pop("order_has_categories", None)
+    await update.callback_query.edit_message_text(
+        "🏠 <b>Main menu</b>\n\nYour unfinished cart was cleared.",
         parse_mode="HTML",
         reply_markup=main_menu_kb(),
     )
+    return ConversationHandler.END
+
+
+async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer("Order cancelled")
+    context.user_data.pop("cart", None)
+    context.user_data.pop("temp_item", None)
+    context.user_data.pop("player_id", None)
+    context.user_data.pop("temp_cat", None)
+    context.user_data.pop("order_has_categories", None)
+    message = update.callback_query.message if update.callback_query else update.message
+    text = "✖ <b>Order cancelled</b>\n\nYour cart has been cleared. You can start again anytime."
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text, parse_mode="HTML", reply_markup=main_menu_kb()
+        )
+    else:
+        await message.reply_text(text, parse_mode="HTML", reply_markup=main_menu_kb())
     return ConversationHandler.END
 
 
@@ -429,13 +477,13 @@ async def cmd_my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    text = "📦  <b>Your Recent Orders</b>\n\n"
+    text = "📦 <b>Your orders</b>\n──────────────\n"
     for order in orders:
         icon, label, _ = STATUS_DISPLAY.get(order.status.value, ("❓", order.status.value, ""))
-        text += f"{icon}  <b>{order.order_id}</b> — {label}\n"
+        text += f"{icon} <b>{html.escape(order.order_id, quote=False)}</b> · {label}\n"
         for item in order.items:
-            text += f"     • {html.escape(item.product_name, quote=False)} x{item.quantity}\n"
-        text += f"     🎯 <code>{html.escape(order.player_id, quote=False)}</code>\n\n"
+            text += f"📦 {html.escape(item.product_name, quote=False)} × {item.quantity}\n"
+        text += f"🎮 <code>{html.escape(order.player_id, quote=False)}</code>\n\n"
 
     await msg.reply_text(text, parse_mode="HTML", reply_markup=main_menu_kb())
 
@@ -459,10 +507,10 @@ async def cb_refresh_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     icon, label, desc = STATUS_DISPLAY.get(order.status.value, ("❓", order.status.value, ""))
     await update.callback_query.edit_message_text(
-        f"🔄  <b>Order Status</b>\n\n"
-        f"  🆔  <b>{order.order_id}</b>\n"
-        f"  {icon}  <b>{label}</b>\n"
-        f"  📝  {desc}",
+        "🔎 <b>Order status</b>\n──────────────\n"
+        f"🧾 <b>Order ID</b>  <code>{html.escape(order.order_id, quote=False)}</code>\n"
+        f"{icon} <b>{label}</b>\n"
+        f"📝 {desc}",
         reply_markup=order_status_kb(order_id),
         parse_mode="HTML",
     )
@@ -492,10 +540,12 @@ def get_order_conversation() -> ConversationHandler:
             ],
             ORDER_CONFIRM: [
                 CallbackQueryHandler(cb_confirm_order, pattern=r"^confirm_order$"),
+                CallbackQueryHandler(cb_edit_player_id, pattern=r"^edit_player_id$"),
                 CallbackQueryHandler(cb_cancel, pattern=r"^cancel_order$"),
             ],
         },
         fallbacks=[
+            CallbackQueryHandler(cb_return_to_menu, pattern=r"^main_menu$"),
             CallbackQueryHandler(cb_cancel, pattern=r"^cancel_order$"),
             CommandHandler("cancel", cb_cancel),
         ],

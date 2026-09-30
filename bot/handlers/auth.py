@@ -1,6 +1,7 @@
 """
 Auth handler — professional UI with invite-code access system.
 """
+import html
 import logging
 from telegram import Update
 from telegram.ext import (
@@ -14,14 +15,22 @@ from database.models import AuthStatus
 from bot.states.states import ENTER_PIN
 from bot.keyboards.customer_kb import main_menu_kb, back_to_menu_kb
 from bot.middlewares.auth_middleware import is_admin
-from config.settings import STORE_NAME, BINANCE_ID
+from config.settings import STORE_NAME
 
 logger = logging.getLogger(__name__)
 
-LOGO = f"""
-┌──────────────────────────┐
-│   🏪  <b>{STORE_NAME.upper()}</b>   │
-└──────────────────────────┘"""
+BRAND = f"✨ <b>{html.escape(STORE_NAME.strip().upper(), quote=False)}</b> ✨"
+
+
+def _welcome_text(name: str, returning: bool = False) -> str:
+    safe_name = html.escape(name, quote=False)
+    greeting = "Welcome back" if returning else "Welcome"
+    return (
+        f"{BRAND}\n"
+        "<i>Your order and tracking center</i>\n\n"
+        f"👋 {greeting}, <b>{safe_name}</b>!\n\n"
+        "Choose an option below to get started."
+    )
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -29,10 +38,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_admin(user.id):
         await update.message.reply_text(
-            f"{LOGO}\n\n"
-            f"👋  Hey <b>{user.first_name}</b>!\n\n"
-            f"You are signed in as <b>Administrator</b>.\n"
-            f"Use /admin to open the control panel.",
+            f"{BRAND}\n\n"
+            f"👋  Hello, <b>{html.escape(user.first_name, quote=False)}</b>!\n\n"
+            "You are signed in as an <b>administrator</b>.\n"
+            "Send /admin to open the control panel.",
             parse_mode="HTML",
         )
         return ConversationHandler.END
@@ -43,9 +52,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if db_user.auth_status == AuthStatus.revoked:
             await update.message.reply_text(
-                "⛔  <b>Access Revoked</b>\n\n"
-                "Your access to this bot has been revoked.\n"
-                "Contact the administrator for assistance.",
+                "⛔ <b>Access unavailable</b>\n\n"
+                "Your account cannot use this bot right now.\n"
+                "Please contact the administrator.",
                 parse_mode="HTML",
             )
             return ConversationHandler.END
@@ -55,9 +64,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from datetime import timezone
             remaining = int((db_user.locked_until - datetime.datetime.now(timezone.utc)).total_seconds() // 60) + 1
             await update.message.reply_text(
-                "🔒  <b>Account Temporarily Locked</b>\n\n"
-                f"Too many failed attempts.\n"
-                f"Please wait <b>{remaining} minute(s)</b> and try again.",
+                "🔒 <b>Try again later</b>\n\n"
+                f"There were too many incorrect codes. Try again in <b>{remaining} minute(s)</b>.",
                 parse_mode="HTML",
             )
             return ConversationHandler.END
@@ -67,16 +75,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
 
     await update.message.reply_text(
-        f"{LOGO}\n\n"
-        f"🔐  <b>Private Bot — Access Required</b>\n\n"
-        f"This bot is restricted to authorized\n"
-        f"members only.\n\n"
-        f"┌─────────────────────────┐\n"
-        f"│  Enter your <b>access code</b>   │\n"
-        f"│  provided by the admin.   │\n"
-        f"└─────────────────────────┘\n\n"
-        f"<i>Your message will be deleted\n"
-        f"immediately for security.</i>",
+        f"{BRAND}\n\n"
+        "🔐 <b>Member sign in</b>\n\n"
+        "This bot is available to invited members.\n"
+        "Enter the one-time access code from your administrator.\n\n"
+        "<i>Your code message is deleted after submission.</i>",
         parse_mode="HTML",
     )
     return ENTER_PIN
@@ -98,16 +101,17 @@ async def handle_code_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if success:
         await update.effective_chat.send_message(
-            f"✅  <b>Access Granted!</b>\n\n"
-            f"Welcome to <b>{STORE_NAME}</b>, <b>{user.first_name}</b>! 🎉",
+            f"✅ <b>You're in!</b>\n\n"
+            f"Welcome to <b>{html.escape(STORE_NAME, quote=False)}</b>, "
+            f"<b>{html.escape(user.first_name, quote=False)}</b>.",
             parse_mode="HTML",
         )
         await _show_main_menu_chat(update.effective_chat.id, context, user.first_name)
         return ConversationHandler.END
     else:
         await update.effective_chat.send_message(
-            f"❌  <b>Access Denied</b>\n\n"
-            f"<code>{message}</code>",
+            "❌ <b>That code did not work</b>\n\n"
+            f"<code>{html.escape(message, quote=False)}</code>",
             parse_mode="HTML",
         )
         if "locked" in message.lower() or "revoked" in message.lower():
@@ -129,23 +133,15 @@ async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.clear()
     await update.message.reply_text(
-        "🔓  <b>Logged Out</b>\n\n"
-        "You have been signed out successfully.\n"
-        "Send /start to sign in again.",
+        "🔓 <b>Signed out</b>\n\n"
+        "Send /start whenever you want to sign in again.",
         parse_mode="HTML",
     )
 
 
 async def _show_main_menu(update: Update, name: str, returning: bool = False):
-    greeting = f"Welcome back, <b>{name}</b>! 👋" if returning else f"Welcome, <b>{name}</b>! 🎉"
     await update.message.reply_text(
-        f"{LOGO}\n\n"
-        f"{greeting}\n\n"
-        f"⚡ Fast Delivery  •  🔒 Secure\n"
-        f"💎 Premium UC  •  💳 Binance Pay\n\n"
-        f"┌─────────────────────────┐\n"
-        f"│  What would you like to do?  │\n"
-        f"└─────────────────────────┘",
+        _welcome_text(name, returning),
         reply_markup=main_menu_kb(),
         parse_mode="HTML",
     )
@@ -155,13 +151,8 @@ async def _show_main_menu_chat(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
-            f"{LOGO}\n\n"
-            f"{'👋  ' + name + chr(10) + chr(10) if name else ''}"
-            f"⚡ Fast Delivery  •  🔒 Secure\n"
-            f"💎 Premium UC  •  💳 Binance Pay\n\n"
-            f"┌─────────────────────────┐\n"
-            f"│  What would you like to do?  │\n"
-            f"└─────────────────────────┘"
+            _welcome_text(name) if name else
+            f"{BRAND}\n\nChoose an option below to get started."
         ),
         reply_markup=main_menu_kb(),
         parse_mode="HTML",
@@ -174,14 +165,8 @@ async def cb_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer("🔐 Please authenticate first.", show_alert=True)
         return
     await update.callback_query.answer()
-    user = update.effective_user
     await update.callback_query.message.reply_text(
-        f"{LOGO}\n\n"
-        f"⚡ Fast Delivery  •  🔒 Secure\n"
-        f"💎 Premium UC  •  💳 Binance Pay\n\n"
-        f"┌─────────────────────────┐\n"
-        f"│  What would you like to do?  │\n"
-        f"└─────────────────────────┘",
+        _welcome_text(update.effective_user.first_name, returning=True),
         reply_markup=main_menu_kb(),
         parse_mode="HTML",
     )
@@ -197,9 +182,8 @@ async def cb_logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await repo.logout(db_user)
     context.user_data.clear()
     await update.callback_query.message.reply_text(
-        "🔓  <b>Logged Out Successfully</b>\n\n"
-        "See you next time! 👋\n"
-        "Send /start to sign in again.",
+        "🔓 <b>Signed out</b>\n\n"
+        "Send /start whenever you want to sign in again.",
         parse_mode="HTML",
     )
 
@@ -211,25 +195,19 @@ async def cb_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.callback_query.answer()
     await update.callback_query.message.reply_text(
-        f"┌──────────────────────────┐\n"
-        f"│   💬  SUPPORT & HELP       │\n"
-        f"└──────────────────────────┘\n\n"
-        f"<b>📋 How To Order:</b>\n\n"
-        f"  1️⃣  Tap <b>Place an Order</b>\n"
-        f"  2️⃣  Choose your UC package\n"
-        f"  3️⃣  Enter your PUBG Player ID\n"
-        f"  4️⃣  Review order summary\n"
-        f"  5️⃣  Confirm & submit\n"
-        f"  6️⃣  Get notified when delivered ✅\n\n"
-        f"<b>📦 Order Statuses:</b>\n"
-        f"  ⏳ Pending — received\n"
-        f"  ⚙️ Processing — being processed\n"
-        f"  ✅ Completed — UC delivered!\n"
-        f"  ❌ Failed — issue occurred\n\n"
-        f"<b>🔧 Commands:</b>\n"
-        f"  /start — Main menu\n"
-        f"  /myorders — View your orders\n"
-        f"  /logout — Sign out\n",
+        "💬 <b>Help and order guide</b>\n\n"
+        "<b>Place an order</b>\n"
+        "1. Choose a category and package.\n"
+        "2. Select the quantity.\n"
+        "3. Enter your PUBG Player ID.\n"
+        "4. Review the details and submit.\n\n"
+        "We will message you when the order status changes.\n\n"
+        "<b>Status guide</b>\n"
+        "⏳ Pending · waiting for processing\n"
+        "⚙️ Processing · supplier is working on it\n"
+        "✅ Completed · order is finished\n"
+        "❌ Failed · contact support for help\n\n"
+        "Commands: /start · /myorders · /logout",
         parse_mode="HTML",
         reply_markup=back_to_menu_kb(),
     )
@@ -240,24 +218,13 @@ async def cb_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_auth(update, context):
         await update.callback_query.answer("🔐 Please authenticate first.", show_alert=True)
         return
-    from config.settings import BINANCE_ID, CURRENCY
     await update.callback_query.answer()
     await update.callback_query.message.reply_text(
-        f"┌──────────────────────────┐\n"
-        f"│   ℹ️  ABOUT {STORE_NAME.upper()[:12]}   │\n"
-        f"└──────────────────────────┘\n\n"
-        f"🏪  <b>{STORE_NAME}</b>\n\n"
-        f"Your trusted source for PUBG UC\n"
-        f"and in-game top-ups.\n\n"
-        f"<b>💳 Payment Method:</b>\n"
-        f"  Binance Pay\n"
-        f"  ID: <code>{BINANCE_ID}</code>\n"
-        f"  Currency: <b>{CURRENCY}</b>\n\n"
-        f"<b>⚡ Our Promise:</b>\n"
-        f"  • Fast delivery\n"
-        f"  • 100% secure transactions\n"
-        f"  • Trusted service\n"
-        f"  • 24/7 availability\n",
+        f"🏪 <b>About {html.escape(STORE_NAME, quote=False)}</b>\n\n"
+        "Use this bot to submit orders and follow their progress.\n\n"
+        "📦 Choose a product and enter the correct player ID.\n"
+        "📬 Order updates arrive here in Telegram.\n"
+        "🤝 Orders are sent to the supplier assigned to the product category.",
         parse_mode="HTML",
         reply_markup=back_to_menu_kb(),
     )

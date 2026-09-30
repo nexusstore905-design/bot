@@ -1,6 +1,7 @@
 """
 Supplier handler — handles both text commands and inline buttons.
 """
+import html
 import logging
 from telegram import Update
 from telegram.ext import ContextTypes, MessageHandler, CallbackQueryHandler, filters
@@ -12,12 +13,6 @@ from config.settings import SUPPLIER_CHAT_ID
 
 logger = logging.getLogger(__name__)
 
-STATUS_ICONS = {
-    "completed": "✅",
-    "failed": "❌",
-}
-
-
 async def _process_supplier_action(context: ContextTypes.DEFAULT_TYPE, order_id: str, new_status: OrderStatus, changed_by: str) -> tuple[bool, str, int, str, str]:
     """Updates order status and returns (success, message, customer_id, product_name, player_id)."""
     async with AsyncSessionLocal() as session:
@@ -25,10 +20,12 @@ async def _process_supplier_action(context: ContextTypes.DEFAULT_TYPE, order_id:
         order = await repo.get_by_order_id(order_id)
 
         if order is None:
-            return False, f"⚠️ Order <b>{order_id}</b> not found.", 0, "", ""
+            safe_order_id = html.escape(order_id, quote=False)
+            return False, f"⚠️ Order <code>{safe_order_id}</code> not found.", 0, "", ""
 
         if order.status not in (OrderStatus.pending, OrderStatus.processing):
-            return False, f"⚠️ Order <b>{order_id}</b> is already <b>{order.status.value}</b>.", 0, "", ""
+            safe_order_id = html.escape(order_id, quote=False)
+            return False, f"⚠️ Order <code>{safe_order_id}</code> is already <b>{order.status.value}</b>.", 0, "", ""
 
         updated = await repo.update_status(order, new_status, changed_by=changed_by)
         if not updated:
@@ -49,25 +46,23 @@ async def _process_supplier_action(context: ContextTypes.DEFAULT_TYPE, order_id:
 
 
 async def _notify_customer(context: ContextTypes.DEFAULT_TYPE, customer_id: int, order_id: str, new_status: OrderStatus, product_name: str, player_id: str):
+    safe_order_id = html.escape(str(order_id), quote=False)
+    safe_product_name = html.escape(str(product_name), quote=False)
+    safe_player_id = html.escape(str(player_id), quote=False)
     if new_status == OrderStatus.completed:
         customer_msg = (
-            f"┌──────────────────────────┐\n"
-            f"│   🎉  ORDER COMPLETED        │\n"
-            f"└──────────────────────────┘\n\n"
-            f"  🆔  Order:     <b>{order_id}</b>\n"
-            f"  💎  Product:   <b>{product_name}</b>\n"
-            f"  🎯  Player ID: <code>{player_id}</code>\n\n"
-            f"Your UC has been delivered! Thank you 🙏"
+            "🎉 <b>Order completed</b>\n──────────────\n"
+            f"🧾 <b>Order ID</b>  <code>{safe_order_id}</code>\n"
+            f"📦 <b>Product</b>  {safe_product_name}\n"
+            f"🎮 <b>Player ID</b>  <code>{safe_player_id}</code>\n\n"
+            "Your order is complete. Thank you!"
         )
     else:
         customer_msg = (
-            f"┌──────────────────────────┐\n"
-            f"│   ❌  ORDER FAILED           │\n"
-            f"└──────────────────────────┘\n\n"
-            f"  🆔  Order:     <b>{order_id}</b>\n"
-            f"  💎  Product:   <b>{product_name}</b>\n\n"
-            f"There was an issue with your order.\n"
-            f"Please contact support via main menu."
+            "❌ <b>Order needs attention</b>\n──────────────\n"
+            f"🧾 <b>Order ID</b>  <code>{safe_order_id}</code>\n"
+            f"📦 <b>Product</b>  {safe_product_name}\n\n"
+            "The supplier could not complete this order. Please contact support."
         )
 
     try:
@@ -112,7 +107,8 @@ async def handle_supplier_message(update: Update, context: ContextTypes.DEFAULT_
 
     icon = "✅" if new_status == OrderStatus.completed else "❌"
     await update.message.reply_text(
-        f"{icon}  Order <b>{order_id}</b> marked as <b>{new_status.value.upper()}</b> by {update.effective_user.first_name}.",
+        f"{icon} Order <code>{html.escape(order_id, quote=False)}</code> marked as "
+        f"<b>{new_status.value.upper()}</b> by {html.escape(update.effective_user.first_name, quote=False)}.",
         parse_mode="HTML",
     )
     await _notify_customer(context, customer_id, order_id, new_status, product_name, player_id)
@@ -142,7 +138,8 @@ async def cb_supplier_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
     original_text = update.callback_query.message.text
     # We strip out the "Mark as DONE or ERROR" and replace it
     new_text = original_text.split("Mark as")[0]
-    new_text += f"\n{icon} <b>Marked as {new_status.value.upper()}</b> by {update.effective_user.first_name}"
+    safe_name = html.escape(update.effective_user.first_name, quote=False)
+    new_text += f"\n{icon} <b>Marked as {new_status.value.upper()}</b> by {safe_name}"
     
     await update.callback_query.message.edit_text(
         text=new_text,
@@ -154,7 +151,8 @@ async def cb_supplier_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 def get_supplier_handlers() -> list:
-    handlers = [CallbackQueryHandler(cb_supplier_action, pattern=r"^sup_(done|error):")]
+    # The Flask API uses sup_err; the bot order flow uses sup_error.
+    handlers = [CallbackQueryHandler(cb_supplier_action, pattern=r"^sup_(done|err|error):")]
     if SUPPLIER_CHAT_ID:
         handlers.insert(
             0,

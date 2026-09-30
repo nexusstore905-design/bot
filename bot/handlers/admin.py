@@ -4,6 +4,7 @@ All functions are gated by is_admin() Telegram ID check.
 """
 import html
 import logging
+import re
 from telegram import Update
 from telegram.ext import (
     ContextTypes, ConversationHandler,
@@ -314,16 +315,15 @@ async def cb_list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.reply_text("No products.", reply_markup=admin_products_kb())
         return
 
-    lines = ["━━━━━━━━━━━━━━━━━━━━━━━\n  📦  <b>ALL PRODUCTS</b>\n━━━━━━━━━━━━━━━━━━━━━━━\n"]
+    lines = ["📦 <b>Product groups and packages</b>\n──────────────"]
     cat = None
     for p in products:
         if p.category != cat:
             cat = p.category
             sup = f"<code>{p.supplier_chat_id}</code>" if p.supplier_chat_id else "<i>default</i>"
-            lines.append(f"\n📂  <b>{cat}</b>  📡 {sup}")
+            lines.append(f"\n📂 <b>{html.escape(cat, quote=False)}</b>  · Supplier: {sup}")
         active = "✅" if p.is_active else "❌"
-        lines.append(f"  {active}  #{p.id}  {p.name}")
-    lines.append(f"\n━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"{active} <code>#{p.id}</code>  {html.escape(p.name, quote=False)}")
     await update.callback_query.message.reply_text(
         "\n".join(lines), parse_mode="HTML", reply_markup=admin_products_kb()
     )
@@ -332,37 +332,90 @@ async def cb_list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @_admin_guard
 async def cb_add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
+    async with AsyncSessionLocal() as session:
+        groups = await ProductRepository(session).get_categories()
+    group_hint = "\n\nExisting groups: " + ", ".join(groups) if groups else ""
     await update.callback_query.message.reply_text(
-        "📂  Enter <b>category</b> name:\n<i>e.g. PUBG UC, Free Fire, Mobile Legends</i>\n\n/cancel to abort",
+        "📂 <b>Enter the product group name</b>\n\n"
+        "This is the category customers open to see packages.\n"
+        "For example, enter <code>PUBG UC</code> for a UC package group. "
+        "To add more packages to a group, enter that group name again."
+        f"{html.escape(group_hint, quote=False)}\n\n/cancel to stop",
         parse_mode="HTML",
     )
     return ADMIN_ADD_CAT
 
 
 async def admin_add_cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return ConversationHandler.END
-    context.user_data["add_cat"] = update.message.text.strip()
-    await update.message.reply_text("📝  Enter <b>product name</b>:", parse_mode="HTML")
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+    category = update.message.text.strip()
+    if not category or len(category) > 64:
+        await update.message.reply_text("Enter a group name from 1 to 64 characters:")
+        return ADMIN_ADD_CAT
+    context.user_data["add_cat"] = category
+    await update.message.reply_text(
+        "💎 <b>Enter the packages or denominations</b>\n\n"
+        "Send one package per line or separate them with commas.\n\n"
+        "Example for PUBG UC:\n"
+        "<code>60 UC\n325 UC\n660 UC\n1800 UC\n3850 UC\n8100 UC</code>\n\n"
+        "You can include several new packages in one message.\n/cancel to stop",
+        parse_mode="HTML",
+    )
     return ADMIN_ADD_NAME
 
 
 async def admin_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return ConversationHandler.END
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
     cat = context.user_data.get("add_cat", "")
-    name = update.message.text.strip()
+    names = [
+        part.strip()
+        for line in update.message.text.splitlines()
+        for part in re.split(r"[,;]", line)
+        if part.strip()
+    ]
+    if not names:
+        await update.message.reply_text("Send at least one package name, or /cancel to stop.")
+        return ADMIN_ADD_NAME
+    if len(names) > 50:
+        await update.message.reply_text("Add up to 50 packages in one message. Please send a shorter list.")
+        return ADMIN_ADD_NAME
+    if any(len(name) > 128 for name in names):
+        await update.message.reply_text("Each package name must be 128 characters or fewer. Please try again.")
+        return ADMIN_ADD_NAME
 
     async with AsyncSessionLocal() as session:
         repo = ProductRepository(session)
-        product = await repo.add(cat, name)
+        products, skipped = await repo.add_many(cat, names)
+
+    if not products:
+        await update.message.reply_text(
+            "ℹ️ Those package names are already in this group. Send different names or /cancel."
+        )
+        return ADMIN_ADD_NAME
+
+    package_lines = [
+        f"• {html.escape(product.name, quote=False)}"
+        for product in products[:20]
+    ]
+    if len(products) > 20:
+        package_lines.append(f"• …and {len(products) - 20} more")
+    supplier_note = (
+        "\n📡 The group’s saved supplier destination was applied to these packages."
+        if products[0].supplier_chat_id else
+        "\n📡 No group supplier is saved; the global fallback may be used."
+    )
+    skipped_note = f"\nSkipped existing names: <b>{len(skipped)}</b>." if skipped else ""
 
     await update.message.reply_text(
-        f"✅  <b>Product Added</b>\n\n"
-        f"  📂  Category: <b>{cat}</b>\n"
-        f"  📦  Name:     <b>{product.name}</b>\n\n"
-        f"<i>Tip: Set the supplier group for this category in Products → Set Supplier Group</i>",
+        f"✅ <b>Packages added to {html.escape(products[0].category, quote=False)}</b>\n"
+        f"──────────────\n"
+        f"{chr(10).join(package_lines)}\n"
+        f"\nAdded: <b>{len(products)}</b>{skipped_note}{supplier_note}",
         parse_mode="HTML", reply_markup=admin_products_kb(),
     )
-    context.user_data.clear()
+    context.user_data.pop("add_cat", None)
     return ConversationHandler.END
 
 
@@ -580,19 +633,16 @@ async def cb_admin_api_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     await update.callback_query.message.reply_text(
-        f"┌──────────────────────────┐\n"
-        f"│   🔑  API SETTINGS           │\n"
-        f"└──────────────────────────┘\n\n"
-        f"Use the REST API to manage orders from\n"
-        f"external platforms or web panels.\n\n"
-        f"🌐  <b>API:</b> Flask WSGI service\n"
-        f"📍  <b>Hosting:</b> PythonAnywhere Web tab\n"
-        f"🔐  <b>API Key:</b>\n"
+        "🔑 <b>API settings</b>\n──────────────\n"
+        "Use the REST API to accept orders from connected platforms.\n\n"
+        "🌐 <b>Service</b>  Flask API\n"
+        "📍 <b>Host</b>  PythonAnywhere Web tab\n"
+        "🔐 <b>API key</b>\n"
         f"{key_status}\n\n"
-        f"<i>Pass this key in the <code>X-API-Key</code> header.</i>\n\n"
-        f"<b>Endpoints:</b>\n"
-        f"<code>POST /orders/</code> - Create order\n"
-        f"<code>GET /orders/{{id}}</code> - Check status",
+        "<i>Send the key in the X-API-Key header.</i>\n\n"
+        "<b>Endpoints</b>\n"
+        "<code>POST /orders/</code>  Create an order\n"
+        "<code>GET /orders/{id}</code>  Check order status",
         parse_mode="HTML",
         reply_markup=admin_main_kb()
     )

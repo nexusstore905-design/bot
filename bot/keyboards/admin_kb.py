@@ -1,26 +1,27 @@
-"""
-Professional admin keyboards.
-"""
+"""Inline menus shown in the admin control panel."""
+import os
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-import os
-
 def admin_main_kb() -> InlineKeyboardMarkup:
     is_on = not os.path.exists("maintenance.flag")
-    status_btn = InlineKeyboardButton("🟢 Bot: ON", callback_data="adm_toggle_power") if is_on else InlineKeyboardButton("🔴 Bot: OFF (Maintenance)", callback_data="adm_toggle_power")
+    status_btn = (
+        InlineKeyboardButton("🟢  Service is on", callback_data="adm_toggle_power")
+        if is_on else
+        InlineKeyboardButton("🔴  Maintenance mode", callback_data="adm_toggle_power")
+    )
     
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📦  Orders",         callback_data="adm_orders"),
-         InlineKeyboardButton("📊  Statistics",     callback_data="adm_stats")],
-        [InlineKeyboardButton("🛍  Products",        callback_data="adm_products"),
-         InlineKeyboardButton("👥  Users",           callback_data="adm_users")],
-        [InlineKeyboardButton("🔐  Access Codes",   callback_data="adm_pin"),
-         InlineKeyboardButton("🔑  API Settings",   callback_data="adm_api_info")],
-        [InlineKeyboardButton("🏪  API Stores",     callback_data="adm_api_stores"),
-         InlineKeyboardButton("🚦  User Limits",    callback_data="adm_user_limits")],
+        [InlineKeyboardButton("📦  Orders", callback_data="adm_orders"),
+         InlineKeyboardButton("📊  Overview", callback_data="adm_stats")],
+        [InlineKeyboardButton("🛍  Products", callback_data="adm_products"),
+         InlineKeyboardButton("👥  Customers", callback_data="adm_users")],
+        [InlineKeyboardButton("🔐  Access codes", callback_data="adm_pin"),
+         InlineKeyboardButton("🔑  API settings", callback_data="adm_api_info")],
+        [InlineKeyboardButton("🏪  API stores", callback_data="adm_api_stores"),
+         InlineKeyboardButton("🚦  Order limits", callback_data="adm_user_limits")],
         [status_btn],
-        [InlineKeyboardButton("🏠  Customer View",  callback_data="main_menu")],
+        [InlineKeyboardButton("🏠  Customer menu", callback_data="main_menu")],
     ])
 
 
@@ -30,18 +31,18 @@ def admin_orders_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("⚙️  Processing",  callback_data="adm_orders_processing")],
         [InlineKeyboardButton("✅  Completed",   callback_data="adm_orders_completed"),
          InlineKeyboardButton("❌  Failed",       callback_data="adm_orders_failed")],
-        [InlineKeyboardButton("🔍  Search Order",callback_data="adm_search_order")],
+        [InlineKeyboardButton("🔍  Find order", callback_data="adm_search_order")],
         [InlineKeyboardButton("◀  Back",         callback_data="admin_menu")],
     ])
 
 
 def admin_products_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕  Add Product",  callback_data="adm_add_product")],
-        [InlineKeyboardButton("📡  Set Supplier Group", callback_data="adm_set_supplier")],
-        [InlineKeyboardButton("✏️  Edit Name/UC", callback_data="adm_edit_name"),
+        [InlineKeyboardButton("➕  Add group & packages", callback_data="adm_add_product")],
+        [InlineKeyboardButton("📡  Supplier groups", callback_data="adm_set_supplier")],
+        [InlineKeyboardButton("✏️  Edit product", callback_data="adm_edit_name"),
          InlineKeyboardButton("🗑  Remove",        callback_data="adm_remove_product")],
-        [InlineKeyboardButton("📋  View All",     callback_data="adm_list_products")],
+        [InlineKeyboardButton("📋  Product list", callback_data="adm_list_products")],
         [InlineKeyboardButton("◀  Back",          callback_data="admin_menu")],
     ])
 

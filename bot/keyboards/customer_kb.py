@@ -1,21 +1,14 @@
-"""
-Professional customer keyboards with clean, attractive layout.
-"""
+"""Inline menus shown to customers."""
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
-
-# ─── Decorative separators used in messages ───────────────────────────
-SEP = "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰"
-SEP_THIN = "─────────────────────────"
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛒  Place an Order", callback_data="order_start")],
-        [InlineKeyboardButton("📦  My Orders",     callback_data="my_orders"),
-         InlineKeyboardButton("💬  Support",        callback_data="help")],
-        [InlineKeyboardButton("ℹ️  About Store",   callback_data="about"),
-         InlineKeyboardButton("🔓  Logout",         callback_data="logout")],
+        [InlineKeyboardButton("✨  New order", callback_data="order_start")],
+        [InlineKeyboardButton("📦  My orders", callback_data="my_orders"),
+         InlineKeyboardButton("💬  Help", callback_data="help")],
+        [InlineKeyboardButton("🏪  About", callback_data="about"),
+         InlineKeyboardButton("🔓  Sign out", callback_data="logout")],
     ])
 
 
@@ -31,8 +24,8 @@ def categories_kb(categories: list[str]) -> InlineKeyboardMarkup:
         for c in categories
     ]
     rows.append([
-        InlineKeyboardButton("🏠  Main Menu", callback_data="main_menu"),
-        InlineKeyboardButton("✖  Cancel",    callback_data="cancel"),
+        InlineKeyboardButton("🏠  Menu", callback_data="main_menu"),
+        InlineKeyboardButton("✖  Cancel", callback_data="cancel_order"),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -46,8 +39,8 @@ def products_kb(products: list) -> InlineKeyboardMarkup:
         for p in products
     ]
     rows.append([
-        InlineKeyboardButton("◀  Back",       callback_data="order_start"),
-        InlineKeyboardButton("✖  Cancel",    callback_data="cancel"),
+        InlineKeyboardButton("◀  Catalog", callback_data="order_start"),
+        InlineKeyboardButton("✖  Cancel", callback_data="cancel_order"),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -60,29 +53,30 @@ def quantity_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("4️⃣", callback_data="qty:4"),
          InlineKeyboardButton("5️⃣", callback_data="qty:5"),
          InlineKeyboardButton("🔟", callback_data="qty:10")],
-        [InlineKeyboardButton("◀  Back", callback_data="order_start"),
-         InlineKeyboardButton("✖  Cancel", callback_data="cancel")],
+        [InlineKeyboardButton("◀  Products", callback_data="order_start"),
+         InlineKeyboardButton("✖  Cancel", callback_data="cancel_order")],
     ])
+
 
 def cart_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛒  Checkout Now", callback_data="cart_checkout")],
-        [InlineKeyboardButton("➕  Add Another Package", callback_data="order_start")],
-        [InlineKeyboardButton("🗑  Clear Cart", callback_data="cart_clear"),
-         InlineKeyboardButton("✖  Cancel", callback_data="cancel")],
+        [InlineKeyboardButton("✅  Continue to checkout", callback_data="cart_checkout")],
+        [InlineKeyboardButton("➕  Add another item", callback_data="order_start")],
+        [InlineKeyboardButton("🗑  Clear cart", callback_data="cart_clear"),
+         InlineKeyboardButton("✖  Cancel", callback_data="cancel_order")],
     ])
 
 def confirm_order_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅  Confirm & Submit", callback_data="confirm_order")],
-        [InlineKeyboardButton("✏️  Edit Player ID",  callback_data="order_start"),
-         InlineKeyboardButton("✖  Cancel",          callback_data="cancel")],
+        [InlineKeyboardButton("🚀  Submit order", callback_data="confirm_order")],
+        [InlineKeyboardButton("✏️  Change Player ID", callback_data="edit_player_id"),
+         InlineKeyboardButton("✖  Cancel", callback_data="cancel_order")],
     ])
 
 
 def order_status_kb(order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄  Refresh Status",  callback_data=f"refresh_order:{order_id}")],
-        [InlineKeyboardButton("📋  All My Orders",   callback_data="my_orders"),
-         InlineKeyboardButton("🏠  Main Menu",       callback_data="main_menu")],
+        [InlineKeyboardButton("🔄  Refresh status", callback_data=f"refresh_order:{order_id}")],
+        [InlineKeyboardButton("📋  My orders", callback_data="my_orders"),
+         InlineKeyboardButton("🏠  Menu", callback_data="main_menu")],
     ])
