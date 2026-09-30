@@ -437,9 +437,9 @@ async def cb_refresh_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def get_order_conversation() -> list:
+def get_order_conversation() -> ConversationHandler:
     from telegram.ext import ConversationHandler
-    conv = ConversationHandler(
+    return ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_order_start, pattern=r"^order_start$")],
         states={
             ORDER_SELECT_CATEGORY: [
@@ -470,4 +470,3 @@ def get_order_conversation() -> list:
         ],
         allow_reentry=True,
     )
-    return [conv]
