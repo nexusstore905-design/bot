@@ -2,7 +2,6 @@
 Professional customer keyboards with clean, attractive layout.
 """
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from config.settings import CURRENCY, STORE_NAME
 
 
 # ─── Decorative separators used in messages ───────────────────────────
@@ -41,7 +40,7 @@ def categories_kb(categories: list[str]) -> InlineKeyboardMarkup:
 def products_kb(products: list) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(
-            f"💎  {p.name}  ·  {CURRENCY} {p.price:.2f}",
+            f"💎  {p.name}",
             callback_data=f"prod:{p.id}"
         )]
         for p in products

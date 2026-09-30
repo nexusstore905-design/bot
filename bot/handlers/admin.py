@@ -23,8 +23,7 @@ from bot.keyboards.admin_kb import (
 )
 from bot.keyboards.customer_kb import main_menu_kb
 from bot.states.states import (
-    ADMIN_SET_PIN, ADMIN_ADD_CAT, ADMIN_ADD_NAME, ADMIN_ADD_PRICE,
-    ADMIN_EDIT_PRICE_SELECT, ADMIN_EDIT_PRICE_VALUE,
+    ADMIN_SET_PIN, ADMIN_ADD_CAT, ADMIN_ADD_NAME, ADMIN_SET_SUPPLIER,
     ADMIN_EDIT_NAME_SELECT, ADMIN_EDIT_NAME_VALUE,
     ADMIN_CHANGE_STATUS_ID, ADMIN_SEARCH_ORDER,
     ADMIN_REVOKE_USER, ADMIN_RESET_USER,
@@ -32,7 +31,7 @@ from bot.states.states import (
     ADMIN_ADD_STORE_NAME, ADMIN_STORE_SET_LIMIT,
     ADMIN_SET_USER_LIMIT_ID, ADMIN_SET_USER_LIMIT_VALUE,
 )
-from config.settings import CURRENCY
+
 
 logger = logging.getLogger(__name__)
 STATUS_ICONS = {"pending": "⏳", "processing": "⚙️", "completed": "✅", "failed": "❌", "cancelled": "🚫"}
@@ -206,7 +205,6 @@ async def admin_search_order(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"Telegram: <code>{order.user.telegram_id}</code>\n"
         f"Product: {item.product_name if item else '—'}\n"
         f"Player ID: <code>{order.player_id}</code>\n"
-        f"Price: {CURRENCY} {item.unit_price:.2f}\n"
         f"Created: {order.created_at.strftime('%Y-%m-%d %H:%M')}\n\n"
         f"<b>Status History:</b>\n" + "\n".join(history_lines),
         reply_markup=change_status_kb(order.order_id),
@@ -311,9 +309,10 @@ async def cb_list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for p in products:
         if p.category != cat:
             cat = p.category
-            lines.append(f"\n📂  <b>{cat}</b>")
+            sup = f"<code>{p.supplier_chat_id}</code>" if p.supplier_chat_id else "<i>default</i>"
+            lines.append(f"\n📂  <b>{cat}</b>  📡 {sup}")
         active = "✅" if p.is_active else "❌"
-        lines.append(f"  {active}  #{p.id}  {p.name}  —  {CURRENCY} {p.price:.2f}")
+        lines.append(f"  {active}  #{p.id}  {p.name}")
     lines.append(f"\n━━━━━━━━━━━━━━━━━━━━━━━")
     await update.callback_query.message.reply_text(
         "\n".join(lines), parse_mode="HTML", reply_markup=admin_products_kb()
@@ -324,7 +323,7 @@ async def cb_list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.message.reply_text(
-        "📂  Enter <b>category</b> name:\n<i>e.g. PUBG UC, Free Fire</i>\n\n/cancel to abort",
+        "📂  Enter <b>category</b> name:\n<i>e.g. PUBG UC, Free Fire, Mobile Legends</i>\n\n/cancel to abort",
         parse_mode="HTML",
     )
     return ADMIN_ADD_CAT
@@ -339,79 +338,94 @@ async def admin_add_cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return ConversationHandler.END
-    context.user_data["add_name"] = update.message.text.strip()
-    await update.message.reply_text(f"💰  Enter <b>price</b> in {CURRENCY}:", parse_mode="HTML")
-    return ADMIN_ADD_PRICE
-
-
-async def admin_add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return ConversationHandler.END
-    try:
-        price = float(update.message.text.strip())
-        if price <= 0: raise ValueError
-    except ValueError:
-        await update.message.reply_text("❌  Invalid price. Enter a positive number:")
-        return ADMIN_ADD_PRICE
+    cat = context.user_data.get("add_cat", "")
+    name = update.message.text.strip()
 
     async with AsyncSessionLocal() as session:
         repo = ProductRepository(session)
-        product = await repo.add(context.user_data["add_cat"], context.user_data["add_name"], price)
+        product = await repo.add(cat, name)
 
     await update.message.reply_text(
         f"✅  <b>Product Added</b>\n\n"
-        f"#{product.id}  {product.name}  —  {CURRENCY} {product.price:.2f}",
+        f"  📂  Category: <b>{cat}</b>\n"
+        f"  📦  Name:     <b>{product.name}</b>\n\n"
+        f"<i>Tip: Set the supplier group for this category in Products → Set Supplier Group</i>",
         parse_mode="HTML", reply_markup=admin_products_kb(),
     )
     context.user_data.clear()
     return ConversationHandler.END
 
 
+# ─── Set Supplier Group per Category ─────────────────────────────────
+
 @_admin_guard
-async def cb_edit_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cb_set_supplier_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     async with AsyncSessionLocal() as session:
-        repo = ProductRepository(session)
-        products = await repo.get_all_active()
-    lines = ["Enter <b>product ID</b> to edit price:\n"]
-    for p in products:
-        lines.append(f"  <b>#{p.id}</b>  {p.name}  —  {CURRENCY} {p.price:.2f}")
+        categories = await ProductRepository(session).get_categories()
+    if not categories:
+        await update.callback_query.message.reply_text("❌  No categories found. Add products first.")
+        return ConversationHandler.END
+
+    lines = ["📡  <b>Set Supplier Group per Category</b>\n\n"
+             "Reply with:\n<code>CATEGORY | CHAT_ID</code>\n\n"
+             "Examples:\n"
+             "  <code>PUBG UC | -1001234567890</code>\n"
+             "  <code>Free Fire | -1009876543210</code>\n\n"
+             "To <b>remove</b> a custom supplier (use global default):\n"
+             "  <code>PUBG UC | 0</code>\n\n"
+             "Current categories:\n"]
+    for cat in categories:
+        async with AsyncSessionLocal() as session:
+            sup_id = await ProductRepository(session).get_supplier_for_category(cat)
+        sup_text = f"<code>{sup_id}</code>" if sup_id else "<i>default</i>"
+        lines.append(f"  📂  <b>{cat}</b> → {sup_text}")
     lines.append("\n/cancel to abort")
     await update.callback_query.message.reply_text("\n".join(lines), parse_mode="HTML")
-    return ADMIN_EDIT_PRICE_SELECT
+    return ADMIN_SET_SUPPLIER
 
 
-async def admin_edit_price_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_set_supplier_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return ConversationHandler.END
-    try:
-        pid = int(update.message.text.strip().replace("#", ""))
-    except ValueError:
-        await update.message.reply_text("❌  Enter a valid product ID:")
-        return ADMIN_EDIT_PRICE_SELECT
-    async with AsyncSessionLocal() as session:
-        product = await ProductRepository(session).get_by_id(pid)
-    if not product:
-        await update.message.reply_text("Product not found.")
-        return ADMIN_EDIT_PRICE_SELECT
-    context.user_data["edit_pid"] = pid
-    await update.message.reply_text(
-        f"<b>{product.name}</b> — current: {CURRENCY} {product.price:.2f}\n\nEnter <b>new price</b>:",
-        parse_mode="HTML",
-    )
-    return ADMIN_EDIT_PRICE_VALUE
+    text = update.message.text.strip()
+    if "|" not in text:
+        await update.message.reply_text(
+            "❌  Wrong format. Use:\n<code>CATEGORY | CHAT_ID</code>\n\nTry again or /cancel",
+            parse_mode="HTML"
+        )
+        return ADMIN_SET_SUPPLIER
 
-
-async def admin_edit_price_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return ConversationHandler.END
+    parts = text.split("|", 1)
+    category = parts[0].strip()
     try:
-        price = float(update.message.text.strip())
-        if price <= 0: raise ValueError
+        chat_id = int(parts[1].strip())
     except ValueError:
-        await update.message.reply_text("❌  Invalid price:")
-        return ADMIN_EDIT_PRICE_VALUE
+        await update.message.reply_text("❌  Chat ID must be a number. Try again or /cancel")
+        return ADMIN_SET_SUPPLIER
+
+    supplier_chat_id = None if chat_id == 0 else chat_id
+
     async with AsyncSessionLocal() as session:
-        await ProductRepository(session).update_price(context.user_data["edit_pid"], price)
-    await update.message.reply_text(f"✅  Price updated to {CURRENCY} {price:.2f}", reply_markup=admin_products_kb())
-    context.user_data.clear()
+        count = await ProductRepository(session).set_category_supplier(category, supplier_chat_id)
+
+    if count == 0:
+        await update.message.reply_text(
+            f"❌  Category <b>{category}</b> not found. Check the spelling.",
+            parse_mode="HTML"
+        )
+        return ADMIN_SET_SUPPLIER
+
+    if supplier_chat_id:
+        await update.message.reply_text(
+            f"✅  Category <b>{category}</b> → supplier set to <code>{supplier_chat_id}</code>\n"
+            f"   ({count} product(s) updated)",
+            parse_mode="HTML", reply_markup=admin_products_kb()
+        )
+    else:
+        await update.message.reply_text(
+            f"✅  Category <b>{category}</b> → supplier reset to <b>default</b>",
+            parse_mode="HTML", reply_markup=admin_products_kb()
+        )
     return ConversationHandler.END
 
 
@@ -425,7 +439,7 @@ async def cb_edit_name_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         products = await repo.get_all_active()
     lines = ["Enter <b>product ID</b> to edit name/UC:\n"]
     for p in products:
-        lines.append(f"  <b>#{p.id}</b>  {p.name}  —  {CURRENCY} {p.price:.2f}")
+        lines.append(f"  <b>#{p.id}</b>  {p.name}")
     lines.append("\n/cancel to abort")
     await update.callback_query.message.reply_text("\n".join(lines), parse_mode="HTML")
     return ADMIN_EDIT_NAME_SELECT
@@ -1025,15 +1039,13 @@ def get_admin_conversations() -> list[ConversationHandler]:
         states={
             ADMIN_ADD_CAT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_cat)],
             ADMIN_ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_name)],
-            ADMIN_ADD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_price)],
         },
         fallbacks=[CommandHandler("cancel", admin_cancel)],
     )
-    edit_price_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_edit_price_start, pattern=r"^adm_edit_price$")],
+    set_supplier_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_set_supplier_start, pattern=r"^adm_set_supplier$")],
         states={
-            ADMIN_EDIT_PRICE_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_price_select)],
-            ADMIN_EDIT_PRICE_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_price_value)],
+            ADMIN_SET_SUPPLIER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set_supplier_value)],
         },
         fallbacks=[CommandHandler("cancel", admin_cancel)],
     )
@@ -1088,7 +1100,7 @@ def get_admin_conversations() -> list[ConversationHandler]:
 
     toggle_handler = CallbackQueryHandler(cb_toggle_power, pattern=r"^adm_toggle_power$")
     return [
-        search_conv, add_product_conv, edit_price_conv, edit_name_conv, 
+        search_conv, add_product_conv, set_supplier_conv, edit_name_conv, 
         create_code_conv, revoke_code_conv, revoke_conv, reset_conv,
         add_store_conv, store_limit_conv, user_limit_conv,
         toggle_handler,

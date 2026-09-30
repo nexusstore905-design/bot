@@ -2,7 +2,6 @@
 Professional admin keyboards.
 """
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from config.settings import CURRENCY
 
 
 import os
@@ -39,10 +38,10 @@ def admin_orders_kb() -> InlineKeyboardMarkup:
 def admin_products_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕  Add Product",  callback_data="adm_add_product")],
-        [InlineKeyboardButton("✏️  Edit Price",   callback_data="adm_edit_price"),
-         InlineKeyboardButton("✏️  Edit Name",    callback_data="adm_edit_name")],
-        [InlineKeyboardButton("🗑  Remove",        callback_data="adm_remove_product"),
-         InlineKeyboardButton("📋  View All",     callback_data="adm_list_products")],
+        [InlineKeyboardButton("📡  Set Supplier Group", callback_data="adm_set_supplier")],
+        [InlineKeyboardButton("✏️  Edit Name/UC", callback_data="adm_edit_name"),
+         InlineKeyboardButton("🗑  Remove",        callback_data="adm_remove_product")],
+        [InlineKeyboardButton("📋  View All",     callback_data="adm_list_products")],
         [InlineKeyboardButton("◀  Back",          callback_data="admin_menu")],
     ])
 
@@ -62,7 +61,7 @@ def admin_pin_kb() -> InlineKeyboardMarkup:
 def remove_products_kb(products: list) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(
-            f"🗑  {p.name}  ·  {CURRENCY} {p.price:.2f}",
+            f"🗑  {p.name}",
             callback_data=f"rm_prod:{p.id}"
         )]
         for p in products

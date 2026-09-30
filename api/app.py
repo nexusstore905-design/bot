@@ -95,7 +95,6 @@ class OrderResponse(BaseModel):
     order_id: str
     status: str
     product_name: str
-    unit_price: float
     player_id: str
     created_at: str
 
@@ -125,19 +124,22 @@ async def create_order(order_req: OrderCreate):
         if not product or not product.is_active:
             raise HTTPException(status_code=400, detail="Invalid or inactive product ID")
         
+        # Look up supplier for this category
+        supplier_id = await product_repo.get_supplier_for_category(product.category)
+        target_chat = supplier_id or SUPPLIER_CHAT_ID
+
         # Create order
         order_repo = OrderRepository(session)
         order = await order_repo.create(
             user_id=user.id,
             product_id=product.id,
             product_name=product.name,
-            unit_price=product.price,
             quantity=1,
             player_id=order_req.player_id,
         )
 
     # Forward to supplier via Telegram bot
-    if SUPPLIER_CHAT_ID:
+    if target_chat:
         from bot.keyboards.admin_kb import supplier_done_error_kb
         from telegram import Bot
         from config.settings import BOT_TOKEN
@@ -153,13 +155,14 @@ async def create_order(order_req: OrderCreate):
             f"└──────────────────────────┘\n\n"
             f"  🆔  Order:     <b>{order.order_id}</b>\n"
             f"  💎  Product:   <b>{product.name}</b>\n"
+            f"  📂  Category:  <b>{product.category}</b>\n"
             f"  🎯  PUBG UID:  <code>{order_req.player_id}</code>\n"
             f"  📦  Quantity:  1\n\n"
             f"Mark as <b>DONE</b> or <b>ERROR</b>:"
         )
         try:
             msg = await bot_instance.send_message(
-                chat_id=SUPPLIER_CHAT_ID,
+                chat_id=target_chat,
                 text=supplier_text,
                 parse_mode="HTML",
                 reply_markup=supplier_done_error_kb(order.order_id),
@@ -170,13 +173,12 @@ async def create_order(order_req: OrderCreate):
                 if fresh:
                     await repo.set_supplier_msg(fresh, msg.message_id)
         except Exception as e:
-            logger.error(f"Failed to send API order to supplier: {e}")
+            logger.error(f"Failed to send API order to supplier {target_chat}: {e}")
 
     return {
         "order_id": order.order_id,
         "status": order.status.value,
         "product_name": product.name,
-        "unit_price": product.price,
         "player_id": order.player_id,
         "created_at": order.created_at.isoformat()
     }

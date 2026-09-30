@@ -16,7 +16,6 @@ class OrderRepository:
         user_id: int,
         product_id: int,
         product_name: str,
-        unit_price: float,
         quantity: int,
         player_id: str,
     ) -> Order:
@@ -34,14 +33,13 @@ class OrderRepository:
             status=OrderStatus.pending,
         )
         self.session.add(order)
-        await self.session.flush()  # Get order.id
+        await self.session.flush()
 
         item = OrderItem(
             order_id=order.id,
             product_id=product_id,
             product_name=product_name,
             quantity=quantity,
-            unit_price=unit_price,
         )
         self.session.add(item)
 
@@ -78,7 +76,7 @@ class OrderRepository:
             status=OrderStatus.pending,
         )
         self.session.add(order)
-        await self.session.flush()  # Get order.id
+        await self.session.flush()
 
         for item in cart_items:
             oi = OrderItem(
@@ -86,7 +84,6 @@ class OrderRepository:
                 product_id=item["product_id"],
                 product_name=item["product_name"],
                 quantity=item["quantity"],
-                unit_price=item["unit_price"],
             )
             self.session.add(oi)
 

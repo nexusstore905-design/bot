@@ -2,7 +2,7 @@ import enum
 from datetime import datetime, timezone
 from typing import Optional, List
 from sqlalchemy import (
-    BigInteger, Boolean, DateTime, Enum, Float,
+    BigInteger, Boolean, DateTime, Enum,
     ForeignKey, Integer, String, Text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -77,10 +77,11 @@ class Product(Base):
     __tablename__ = "products"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    category: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
-    price: Mapped[float] = mapped_column(Float, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Each category can route to a different supplier Telegram group/chat
+    supplier_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -117,14 +118,9 @@ class OrderItem(Base):
     product_id: Mapped[int] = mapped_column(Integer, ForeignKey("products.id"), nullable=False)
     product_name: Mapped[str] = mapped_column(String(128), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    unit_price: Mapped[float] = mapped_column(Float, nullable=False)
 
     order: Mapped["Order"] = relationship("Order", back_populates="items")
     product: Mapped["Product"] = relationship("Product", back_populates="order_items")
-
-    @property
-    def total_price(self) -> float:
-        return self.unit_price * self.quantity
 
 
 class OrderStatusHistory(Base):

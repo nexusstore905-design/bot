@@ -1,5 +1,5 @@
 """
-Customer order flow — professional UI with step indicators.
+Customer order flow — no pricing shown, per-category supplier routing.
 """
 import logging
 from telegram import Update
@@ -22,7 +22,7 @@ from bot.states.states import (
     ORDER_SELECT_CATEGORY, ORDER_SELECT_PRODUCT, ORDER_SELECT_QUANTITY,
     ORDER_CART_ACTION, ORDER_ENTER_PLAYER_ID, ORDER_CONFIRM,
 )
-from config.settings import SUPPLIER_CHAT_ID, CURRENCY, BINANCE_ID, STORE_NAME
+from config.settings import SUPPLIER_CHAT_ID, STORE_NAME
 from bot.keyboards.admin_kb import supplier_done_error_kb
 
 logger = logging.getLogger(__name__)
@@ -30,20 +30,17 @@ logger = logging.getLogger(__name__)
 STATUS_DISPLAY = {
     "pending":    ("⏳", "PENDING",    "Order received, awaiting processing"),
     "processing": ("⚙️", "PROCESSING", "Your order is being processed"),
-    "completed":  ("✅", "COMPLETED",  "UC delivered successfully!"),
+    "completed":  ("✅", "COMPLETED",  "Delivered successfully!"),
     "failed":     ("❌", "FAILED",     "Issue occurred — contact support"),
     "cancelled":  ("🚫", "CANCELLED",  "Order was cancelled"),
 }
 
 
 def _render_cart(cart: list) -> str:
-    total = sum(item["unit_price"] * item["quantity"] for item in cart)
     text = "<b>🛒 Your Shopping Cart</b>\n\n"
     for i, item in enumerate(cart, 1):
         text += f"  {i}. <b>{item['product_name']}</b> x{item['quantity']}\n"
-        text += f"     {CURRENCY} {item['unit_price'] * item['quantity']:.2f}\n"
-    text += f"\n💰  <b>Total: {CURRENCY} {total:.2f}</b>"
-    return text, total
+    return text
 
 
 async def cb_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -52,8 +49,7 @@ async def cb_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     await update.callback_query.answer()
-    
-    # Initialize cart if it doesn't exist
+
     if "cart" not in context.user_data:
         context.user_data["cart"] = []
 
@@ -135,16 +131,15 @@ async def cb_select_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["temp_item"] = {
         "product_id": product.id,
         "product_name": product.name,
-        "unit_price": product.price,
+        "category": product.category,
     }
 
     await update.callback_query.edit_message_text(
         f"┌──────────────────────────┐\n"
         f"│  🛒  ADD TO CART            │\n"
         f"└──────────────────────────┘\n\n"
-        f"✅  <b>{product.name}</b>\n"
-        f"💰  Price: <b>{CURRENCY} {product.price:.2f}</b>\n\n"
-        f"How many of this package do you want?",
+        f"✅  <b>{product.name}</b>\n\n"
+        f"How many do you want?",
         reply_markup=quantity_kb(),
         parse_mode="HTML",
     )
@@ -155,16 +150,16 @@ async def cb_select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not await require_auth(update, context):
         await update.callback_query.answer("🔐 Please authenticate first.", show_alert=True)
         return ConversationHandler.END
-        
+
     await update.callback_query.answer()
     qty = int(update.callback_query.data.split(":", 1)[1])
-    
+
     item = context.user_data.pop("temp_item")
     item["quantity"] = qty
     context.user_data["cart"].append(item)
-    
-    cart_text, _ = _render_cart(context.user_data["cart"])
-    
+
+    cart_text = _render_cart(context.user_data["cart"])
+
     await update.callback_query.edit_message_text(
         f"┌──────────────────────────┐\n"
         f"│  🛒  CART UPDATED           │\n"
@@ -191,20 +186,19 @@ async def cb_cart_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_auth(update, context):
         await update.callback_query.answer("🔐 Please authenticate first.", show_alert=True)
         return ConversationHandler.END
-        
+
     if not context.user_data.get("cart"):
         await update.callback_query.answer("Your cart is empty!", show_alert=True)
         return ConversationHandler.END
-        
+
     await update.callback_query.answer()
-    
+
     await update.callback_query.edit_message_text(
         f"┌──────────────────────────┐\n"
         f"│  🛒  CHECKOUT               │\n"
         f"└──────────────────────────┘\n\n"
         f"📝  <b>Enter your PUBG Player ID:</b>\n\n"
-        f"<i>(This ID will be used for all items in your cart)</i>\n"
-        f"<i>Note: IDs must start with 5 (e.g. 5123456789)</i>",
+        f"<i>(Note: IDs must start with 5, e.g. 5123456789)</i>",
         parse_mode="HTML",
     )
     return ORDER_ENTER_PLAYER_ID
@@ -226,19 +220,14 @@ async def msg_enter_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ORDER_ENTER_PLAYER_ID
 
     context.user_data["player_id"] = player_id
-    cart_text, total = _render_cart(context.user_data["cart"])
+    cart_text = _render_cart(context.user_data["cart"])
 
     await update.message.reply_text(
         f"┌──────────────────────────┐\n"
         f"│  🛒  ORDER REVIEW           │\n"
         f"└──────────────────────────┘\n\n"
         f"{cart_text}\n\n"
-        f"  🎯  <b>Player ID:</b> <code>{player_id}</code>\n"
-        f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        f"  💳  Payment:   <b>Binance Pay</b>\n"
-        f"  🔑  Pay to ID: <code>{BINANCE_ID}</code>\n"
-        f"  💵  Amount:    <b>{CURRENCY} {total:.2f}</b>\n"
-        f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n"
+        f"  🎯  <b>Player ID:</b> <code>{player_id}</code>\n\n"
         f"Please confirm your order:",
         reply_markup=confirm_order_kb(),
         parse_mode="HTML",
@@ -279,8 +268,7 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_repo = UserRepository(session)
         order_repo = OrderRepository(session)
         db_user = await user_repo.get_by_telegram_id(user.id)
-        
-        # Create a single DB order containing all cart items
+
         order = await order_repo.create_cart(
             user_id=db_user.id,
             cart_items=cart,
@@ -297,10 +285,8 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Your order has been sent to our team.\n\n"
         f"  🆔  Order ID:  <b>{order.order_id}</b>\n"
     )
-    
     for item in cart:
         msg_text += f"      - {item['product_name']} x{item['quantity']}\n"
-        
     msg_text += f"\n  🎯  Player ID: <code>{player_id}</code>\n"
     msg_text += f"  ⏳  Status:    <b>PENDING</b>\n\n"
     msg_text += f"You will be notified once processed. Thank you! 🙏"
@@ -311,43 +297,68 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
     )
 
-    # Forward to supplier
-    if SUPPLIER_CHAT_ID:
-        await _forward_to_supplier(context, order.order_id, cart, player_id)
+    # Forward each item group to its own supplier based on category
+    await _forward_to_suppliers(context, order.order_id, cart, player_id)
 
     return ConversationHandler.END
 
 
-async def _forward_to_supplier(context, order_id, cart_items, player_id):
-    """Send single order with multiple items to supplier group."""
-    supplier_text = (
-        f"┌──────────────────────────┐\n"
-        f"│    🆕  NEW ORDER             │\n"
-        f"└──────────────────────────┘\n\n"
-        f"  🆔  Order:     <b>{order_id}</b>\n"
-        f"  🎯  PUBG UID:  <code>{player_id}</code>\n\n"
-        f"  📦  <b>Items:</b>\n"
-    )
-    
+async def _forward_to_suppliers(context, order_id: str, cart_items: list, player_id: str):
+    """
+    Route order items to the correct supplier group per category.
+    If a category has its own supplier_chat_id, use that.
+    Otherwise fall back to the global SUPPLIER_CHAT_ID from .env.
+    Groups items by category and sends one message per supplier group.
+    """
+    # Group cart items by category
+    from collections import defaultdict
+    by_category: dict[str, list] = defaultdict(list)
     for item in cart_items:
-        supplier_text += f"      - {item['product_name']} (x{item['quantity']})\n"
-        
-    supplier_text += f"\nMark as <b>DONE</b> or <b>ERROR</b>:"
-    
-    try:
-        msg = await context.bot.send_message(
-            chat_id=SUPPLIER_CHAT_ID,
-            text=supplier_text,
-            parse_mode="HTML",
-            reply_markup=supplier_done_error_kb(order_id),
-        )
+        cat = item.get("category", "")
+        by_category[cat].append(item)
+
+    sent_to = set()  # track which chat IDs we already messaged (avoid duplicates)
+
+    for category, items in by_category.items():
+        # Look up supplier for this category
         async with AsyncSessionLocal() as session:
-            repo = OrderRepository(session)
-            fresh = await repo.get_by_order_id(order_id)
-            if fresh:
-                await repo.set_supplier_msg(fresh, msg.message_id)
-    except Exception as e:
-        logger.error(f"Failed to send to supplier: {e}")
+            supplier_id = await ProductRepository(session).get_supplier_for_category(category)
+
+        target_chat = supplier_id or SUPPLIER_CHAT_ID
+        if not target_chat:
+            logger.warning(f"No supplier configured for category '{category}' and no global supplier.")
+            continue
+
+        # Build supplier message
+        supplier_text = (
+            f"┌──────────────────────────┐\n"
+            f"│    🆕  NEW ORDER             │\n"
+            f"└──────────────────────────┘\n\n"
+            f"  🆔  Order:     <b>{order_id}</b>\n"
+            f"  🎯  PUBG UID:  <code>{player_id}</code>\n\n"
+            f"  📦  <b>Items ({category}):</b>\n"
+        )
+        for item in items:
+            supplier_text += f"      - {item['product_name']} (x{item['quantity']})\n"
+        supplier_text += f"\nMark as <b>DONE</b> or <b>ERROR</b>:"
+
+        try:
+            msg = await context.bot.send_message(
+                chat_id=target_chat,
+                text=supplier_text,
+                parse_mode="HTML",
+                reply_markup=supplier_done_error_kb(order_id),
+            )
+            # Only save supplier msg id once (first group)
+            if target_chat not in sent_to:
+                async with AsyncSessionLocal() as session:
+                    repo = OrderRepository(session)
+                    fresh = await repo.get_by_order_id(order_id)
+                    if fresh:
+                        await repo.set_supplier_msg(fresh, msg.message_id)
+            sent_to.add(target_chat)
+        except Exception as e:
+            logger.error(f"Failed to send order to supplier {target_chat} for category '{category}': {e}")
 
 
 async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -381,81 +392,54 @@ async def cmd_my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not orders:
         await msg.reply_text(
-            f"┌──────────────────────────┐\n"
-            f"│   📦  MY ORDERS              │\n"
-            f"└──────────────────────────┘\n\n"
-            f"You have no orders yet.\n\n"
-            f"Tap <b>Place an Order</b> to get started!",
+            "📭  <b>No orders yet.</b>\n\nPlace your first order from the main menu!",
             parse_mode="HTML",
-            reply_markup=main_menu_kb()
+            reply_markup=main_menu_kb(),
         )
         return
 
-    lines = [
-        f"┌──────────────────────────┐\n"
-        f"│   📦  MY ORDERS              │\n"
-        f"└──────────────────────────┘\n"
-    ]
-    for o in orders:
-        icon, label, _ = STATUS_DISPLAY.get(o.status.value, ("❓", o.status.value.upper(), ""))
-        item = o.items[0] if o.items else None
-        lines.append(
-            f"\n{icon}  <b>{o.order_id}</b>  ·  {label}\n"
-            f"   💎  {item.product_name if item else '—'}\n"
-            f"   🎯  <code>{o.player_id}</code>\n"
-            f"   🕐  {o.created_at.strftime('%b %d, %H:%M')}\n"
-        )
-    lines.append("─────────────────────────")
+    text = "📦  <b>Your Recent Orders</b>\n\n"
+    for order in orders:
+        icon, label, _ = STATUS_DISPLAY.get(order.status.value, ("❓", order.status.value, ""))
+        text += f"{icon}  <b>{order.order_id}</b> — {label}\n"
+        for item in order.items:
+            text += f"     • {item.product_name} x{item.quantity}\n"
+        text += f"     🎯 <code>{order.player_id}</code>\n\n"
 
-    await msg.reply_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-        reply_markup=main_menu_kb()
-    )
-
-
-async def cb_refresh_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_auth(update, context):
-        await update.callback_query.answer("🔐 Please authenticate first.", show_alert=True)
-        return
-
-    await update.callback_query.answer("Refreshed!")
-    order_id = update.callback_query.data.split(":", 1)[1]
-
-    async with AsyncSessionLocal() as session:
-        order = await OrderRepository(session).get_by_order_id(order_id)
-
-    if not order:
-        await update.callback_query.message.reply_text("Order not found.")
-        return
-
-    icon, label, note = STATUS_DISPLAY.get(order.status.value, ("❓", "UNKNOWN", ""))
-
-    items_text = ""
-    for item in order.items:
-        items_text += f"\n  💎  Package:   {item.product_name} (x{item.quantity})"
-
-    await update.callback_query.message.reply_text(
-        f"┌──────────────────────────┐\n"
-        f"│   📦  ORDER STATUS           │\n"
-        f"└──────────────────────────┘\n\n"
-        f"  🆔  Order ID:  <b>{order.order_id}</b>{items_text}\n"
-        f"  🎯  Player ID: <code>{order.player_id}</code>\n\n"
-        f"  {icon}  Status: <b>{label}</b>\n"
-        f"  <i>{note}</i>",
-        parse_mode="HTML",
-        reply_markup=order_status_kb(order_id),
-    )
+    await msg.reply_text(text, parse_mode="HTML", reply_markup=main_menu_kb())
 
 
 async def cb_my_orders_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    update.message = update.callback_query.message
     await cmd_my_orders(update, context)
 
 
-def get_order_conversation() -> ConversationHandler:
-    return ConversationHandler(
+async def cb_refresh_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer("Refreshing...")
+    order_id = update.callback_query.data.split(":", 1)[1]
+
+    async with AsyncSessionLocal() as session:
+        repo = OrderRepository(session)
+        order = await repo.get_by_order_id(order_id)
+
+    if not order:
+        await update.callback_query.answer("Order not found.", show_alert=True)
+        return
+
+    icon, label, desc = STATUS_DISPLAY.get(order.status.value, ("❓", order.status.value, ""))
+    await update.callback_query.edit_message_text(
+        f"🔄  <b>Order Status</b>\n\n"
+        f"  🆔  <b>{order.order_id}</b>\n"
+        f"  {icon}  <b>{label}</b>\n"
+        f"  📝  {desc}",
+        reply_markup=order_status_kb(order_id),
+        parse_mode="HTML",
+    )
+
+
+def get_order_conversation() -> list:
+    from telegram.ext import ConversationHandler
+    conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_order_start, pattern=r"^order_start$")],
         states={
             ORDER_SELECT_CATEGORY: [
@@ -463,12 +447,12 @@ def get_order_conversation() -> ConversationHandler:
             ],
             ORDER_SELECT_PRODUCT: [
                 CallbackQueryHandler(cb_select_product, pattern=r"^prod:"),
-                CallbackQueryHandler(cb_order_start, pattern=r"^order_start$"),
             ],
             ORDER_SELECT_QUANTITY: [
                 CallbackQueryHandler(cb_select_quantity, pattern=r"^qty:"),
             ],
             ORDER_CART_ACTION: [
+                CallbackQueryHandler(cb_order_start, pattern=r"^order_start$"),
                 CallbackQueryHandler(cb_cart_checkout, pattern=r"^cart_checkout$"),
                 CallbackQueryHandler(cb_cart_clear, pattern=r"^cart_clear$"),
             ],
@@ -477,12 +461,13 @@ def get_order_conversation() -> ConversationHandler:
             ],
             ORDER_CONFIRM: [
                 CallbackQueryHandler(cb_confirm_order, pattern=r"^confirm_order$"),
+                CallbackQueryHandler(cb_cancel, pattern=r"^cancel_order$"),
             ],
         },
         fallbacks=[
-            CallbackQueryHandler(cb_cancel, pattern=r"^cancel$"),
-            CallbackQueryHandler(cb_order_start, pattern=r"^order_start$"),
+            CallbackQueryHandler(cb_cancel, pattern=r"^cancel_order$"),
+            CommandHandler("cancel", cb_cancel),
         ],
         allow_reentry=True,
-        per_message=False,
     )
+    return [conv]

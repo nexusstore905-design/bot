@@ -1,6 +1,5 @@
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from database.models import Product
 
@@ -12,13 +11,13 @@ class ProductRepository:
 
     async def get_all_active(self) -> list[Product]:
         result = await self.session.execute(
-            select(Product).where(Product.is_active == True).order_by(Product.category, Product.price)
+            select(Product).where(Product.is_active == True).order_by(Product.category, Product.name)
         )
         return list(result.scalars().all())
 
     async def get_all(self) -> list[Product]:
         result = await self.session.execute(
-            select(Product).order_by(Product.category, Product.price)
+            select(Product).order_by(Product.category, Product.name)
         )
         return list(result.scalars().all())
 
@@ -32,27 +31,48 @@ class ProductRepository:
         result = await self.session.execute(
             select(Product)
             .where(Product.is_active == True, Product.category == category)
-            .order_by(Product.price)
+            .order_by(Product.name)
         )
         return list(result.scalars().all())
+
+    async def get_supplier_for_category(self, category: str) -> int | None:
+        """Return the supplier_chat_id for this category (from any active product in it)."""
+        result = await self.session.execute(
+            select(Product.supplier_chat_id)
+            .where(Product.category == category, Product.supplier_chat_id.isnot(None))
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+        return int(row) if row else None
 
     async def get_by_id(self, product_id: int) -> Product | None:
         return await self.session.get(Product, product_id)
 
-    async def add(self, category: str, name: str, price: float) -> Product:
-        product = Product(category=category, name=name, price=price)
+    async def add(self, category: str, name: str, supplier_chat_id: int | None = None) -> Product:
+        product = Product(category=category, name=name, supplier_chat_id=supplier_chat_id)
         self.session.add(product)
         await self.session.commit()
         await self.session.refresh(product)
         return product
 
-    async def update_price(self, product_id: int, new_price: float) -> bool:
+    async def update_name(self, product_id: int, new_name: str) -> bool:
         product = await self.get_by_id(product_id)
         if product is None:
             return False
-        product.price = new_price
+        product.name = new_name
         await self.session.commit()
         return True
+
+    async def set_category_supplier(self, category: str, supplier_chat_id: int | None) -> int:
+        """Set supplier_chat_id for ALL products in a category. Returns how many updated."""
+        result = await self.session.execute(
+            select(Product).where(Product.category == category)
+        )
+        products = list(result.scalars().all())
+        for p in products:
+            p.supplier_chat_id = supplier_chat_id
+        await self.session.commit()
+        return len(products)
 
     async def deactivate(self, product_id: int) -> bool:
         product = await self.get_by_id(product_id)
@@ -66,13 +86,13 @@ class ProductRepository:
         count_result = await self.session.execute(select(func.count()).select_from(Product))
         if count_result.scalar() == 0:
             defaults = [
-                ("PUBG UC", "60 UC", 0.99),
-                ("PUBG UC", "325 UC", 4.99),
-                ("PUBG UC", "660 UC", 9.99),
-                ("PUBG UC", "1800 UC", 24.99),
-                ("PUBG UC", "3850 UC", 49.99),
-                ("PUBG UC", "8100 UC", 99.99),
+                ("PUBG UC", "60 UC"),
+                ("PUBG UC", "325 UC"),
+                ("PUBG UC", "660 UC"),
+                ("PUBG UC", "1800 UC"),
+                ("PUBG UC", "3850 UC"),
+                ("PUBG UC", "8100 UC"),
             ]
-            for cat, name, price in defaults:
-                self.session.add(Product(category=cat, name=name, price=price))
+            for cat, name in defaults:
+                self.session.add(Product(category=cat, name=name))
             await self.session.commit()
