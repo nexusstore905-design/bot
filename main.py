@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import sys
-import uvicorn
 
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters,
@@ -31,7 +30,6 @@ from bot.handlers.admin import (
     get_admin_conversations,
 )
 from bot.handlers.supplier import get_supplier_handlers
-from api.app import app as fastapi_app
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -52,9 +50,6 @@ async def main():
     from telegram.ext import AIORateLimiter
     app = Application.builder().token(BOT_TOKEN).rate_limiter(AIORateLimiter()).build()
     
-    # Expose bot to FastAPI
-    fastapi_app.state.bot = app.bot
-
     # 3. Admin conversations (highest priority)
     for conv in get_admin_conversations():
         app.add_handler(conv)
@@ -108,25 +103,24 @@ async def main():
     app.add_handler(CallbackQueryHandler(cb_user_limits, pattern=r"^adm_user_limits$"))
     app.add_handler(CallbackQueryHandler(cb_list_user_limits, pattern=r"^adm_list_user_limits$"))
 
-    # 10. Start both servers concurrently
-    logger.info("Starting Telegram Bot and REST API...")
-    
-    # Configure uvicorn
-    config = uvicorn.Config(fastapi_app, host=API_HOST, port=API_PORT, log_level="info")
-    server = uvicorn.Server(config)
+    # 10. Start Telegram Bot polling
+    logger.info("Starting Telegram Bot...")
     
     async with app:
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
+        logger.info("✅ Telegram Bot is running and listening for messages.")
         
-        # Run FastAPI
+        # Keep running continuously in background task
+        stop_event = asyncio.Event()
         try:
-            await server.serve()
+            await stop_event.wait()
         except (KeyboardInterrupt, SystemExit):
             pass
         finally:
             await app.updater.stop()
             await app.stop()
+            logger.info("Telegram Bot stopped.")
 
 
 if __name__ == "__main__":
