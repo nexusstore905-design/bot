@@ -134,14 +134,20 @@ def create_order():
     if target_chat and BOT_TOKEN:
         try:
             import urllib.request
+            import html
+            safe_order_id = html.escape(str(result['order_id']))
+            safe_prod_name = html.escape(str(result['product_name']))
+            safe_cat = html.escape(str(prod_cat))
+            safe_uid = html.escape(str(result['player_id']))
+
             supplier_text = (
                 f"┌──────────────────────────┐\n"
                 f"│    🆕  API ORDER             │\n"
                 f"└──────────────────────────┘\n\n"
-                f"  🆔  Order:     <b>{result['order_id']}</b>\n"
-                f"  💎  Product:   <b>{result['product_name']}</b>\n"
-                f"  📂  Category:  <b>{prod_cat}</b>\n"
-                f"  🎯  PUBG UID:  <code>{result['player_id']}</code>\n"
+                f"  🆔  Order:     <b>{safe_order_id}</b>\n"
+                f"  💎  Product:   <b>{safe_prod_name}</b>\n"
+                f"  📂  Category:  <b>{safe_cat}</b>\n"
+                f"  🎯  PUBG UID:  <code>{safe_uid}</code>\n"
                 f"  📦  Quantity:  1\n\n"
                 f"Mark as <b>DONE</b> or <b>ERROR</b>:"
             )

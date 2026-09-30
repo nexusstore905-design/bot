@@ -469,4 +469,5 @@ def get_order_conversation() -> ConversationHandler:
             CommandHandler("cancel", cb_cancel),
         ],
         allow_reentry=True,
+        per_message=False,
     )

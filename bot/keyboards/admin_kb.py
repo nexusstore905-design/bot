@@ -58,6 +58,13 @@ def admin_pin_kb() -> InlineKeyboardMarkup:
     ])
 
 
+def create_code_options_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡  Instant Code (No Label)", callback_data="adm_code_instant")],
+        [InlineKeyboardButton("✖  Cancel", callback_data="adm_cancel_conv")],
+    ])
+
+
 def remove_products_kb(products: list) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(

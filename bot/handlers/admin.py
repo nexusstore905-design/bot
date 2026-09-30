@@ -2,6 +2,7 @@
 Admin handler — full admin panel.
 All functions are gated by is_admin() Telegram ID check.
 """
+import html
 import logging
 from telegram import Update
 from telegram.ext import (
@@ -20,6 +21,7 @@ from bot.keyboards.admin_kb import (
     admin_main_kb, admin_orders_kb, admin_products_kb,
     admin_pin_kb, remove_products_kb, change_status_kb,
     api_stores_kb, store_actions_kb, user_limits_kb,
+    create_code_options_kb,
 )
 from bot.keyboards.customer_kb import main_menu_kb
 from bot.states.states import (
@@ -554,36 +556,72 @@ async def cb_create_code_start(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.callback_query.answer()
     await update.callback_query.message.reply_text(
         "➕  <b>Create Access Code</b>\n\n"
-        "Enter a <b>label</b> for this code (e.g. <i>John's code</i>).\n"
-        "This helps you remember who it's for.\n\n"
-        "Or send <b>skip</b> to create without a label.\n\n"
-        "/cancel to abort",
+        "Send a <b>label</b> for this code (e.g. <i>John's Code</i>),\n"
+        "or tap <b>⚡ Instant Code</b> to generate one immediately without a label.",
         parse_mode="HTML",
+        reply_markup=create_code_options_kb(),
     )
     return ADMIN_CREATE_CODE_LABEL
 
 
+@_admin_guard
+async def cb_create_code_instant(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    try:
+        async with AsyncSessionLocal() as session:
+            repo = AccessCodeRepository(session)
+            code = await repo.create(label=None)
+
+        await update.callback_query.message.reply_text(
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"  ✅  <b>Access Code Created</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🔑  Code: <code>{code.code}</code>\n"
+            f"🏷  Label: —\n\n"
+            f"<b>Give this code to the user.</b>\n"
+            f"They enter it on /start to register.\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━",
+            parse_mode="HTML",
+            reply_markup=admin_pin_kb(),
+        )
+    except Exception as e:
+        logger.error(f"Error creating instant access code: {e}", exc_info=True)
+        await update.callback_query.message.reply_text(
+            f"❌  Error generating code: {html.escape(str(e))}\n\nPlease try again.",
+            reply_markup=admin_pin_kb(),
+        )
+    return ConversationHandler.END
+
+
 async def admin_create_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return ConversationHandler.END
-    label_input = update.message.text.strip()
-    label = None if label_input.lower() == "skip" else label_input
+    raw_input = update.message.text.strip()
+    label = None if raw_input.lower() in ("skip", "-", "none") else raw_input[:64]
 
-    async with AsyncSessionLocal() as session:
-        repo = AccessCodeRepository(session)
-        code = await repo.create(label=label)
+    try:
+        async with AsyncSessionLocal() as session:
+            repo = AccessCodeRepository(session)
+            code = await repo.create(label=label)
 
-    await update.message.reply_text(
-        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"  ✅  <b>Access Code Created</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🔑  Code: <code>{code.code}</code>\n"
-        f"🏷  Label: {code.label or '—'}\n\n"
-        f"<b>Give this code to the user.</b>\n"
-        f"They enter it on /start to register.\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━",
-        parse_mode="HTML",
-        reply_markup=admin_pin_kb(),
-    )
+        safe_label = html.escape(code.label) if code.label else "—"
+        await update.message.reply_text(
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"  ✅  <b>Access Code Created</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🔑  Code: <code>{code.code}</code>\n"
+            f"🏷  Label: {safe_label}\n\n"
+            f"<b>Give this code to the user.</b>\n"
+            f"They enter it on /start to register.\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━",
+            parse_mode="HTML",
+            reply_markup=admin_pin_kb(),
+        )
+    except Exception as e:
+        logger.error(f"Error in admin_create_code: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"❌  Error creating code: {html.escape(str(e))}\n\nPlease try again.",
+            reply_markup=admin_pin_kb(),
+        )
     return ConversationHandler.END
 
 
@@ -696,6 +734,14 @@ async def admin_reset_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("✖  Cancelled.", reply_markup=admin_main_kb())
+    return ConversationHandler.END
+
+
+async def cb_admin_cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text("✖  Operation cancelled.", reply_markup=admin_main_kb())
+    context.user_data.clear()
     return ConversationHandler.END
 
 
@@ -1029,10 +1075,17 @@ async def cb_list_user_limits(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ─── Build conversations ──────────────────────────────────────────────
 
 def get_admin_conversations() -> list[ConversationHandler]:
+    common_fallbacks = [
+        CommandHandler(["cancel", "admin", "start"], admin_cancel),
+        CallbackQueryHandler(cb_admin_cancel_conv, pattern=r"^adm_cancel_conv$"),
+    ]
+
     search_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_search_order_start, pattern=r"^adm_search_order$")],
         states={ADMIN_SEARCH_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_search_order)]},
-        fallbacks=[CommandHandler("cancel", admin_cancel)],
+        fallbacks=common_fallbacks,
+        allow_reentry=True,
+        per_message=False,
     )
     add_product_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_add_product_start, pattern=r"^adm_add_product$")],
@@ -1040,14 +1093,18 @@ def get_admin_conversations() -> list[ConversationHandler]:
             ADMIN_ADD_CAT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_cat)],
             ADMIN_ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_name)],
         },
-        fallbacks=[CommandHandler("cancel", admin_cancel)],
+        fallbacks=common_fallbacks,
+        allow_reentry=True,
+        per_message=False,
     )
     set_supplier_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_set_supplier_start, pattern=r"^adm_set_supplier$")],
         states={
             ADMIN_SET_SUPPLIER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set_supplier_value)],
         },
-        fallbacks=[CommandHandler("cancel", admin_cancel)],
+        fallbacks=common_fallbacks,
+        allow_reentry=True,
+        per_message=False,
     )
     edit_name_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_edit_name_start, pattern=r"^adm_edit_name$")],
@@ -1055,38 +1112,57 @@ def get_admin_conversations() -> list[ConversationHandler]:
             ADMIN_EDIT_NAME_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_name_select)],
             ADMIN_EDIT_NAME_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_name_value)],
         },
-        fallbacks=[CommandHandler("cancel", admin_cancel)],
+        fallbacks=common_fallbacks,
+        allow_reentry=True,
+        per_message=False,
     )
     create_code_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_create_code_start, pattern=r"^adm_create_code$")],
-        states={ADMIN_CREATE_CODE_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_create_code)]},
-        fallbacks=[CommandHandler("cancel", admin_cancel)],
+        states={
+            ADMIN_CREATE_CODE_LABEL: [
+                CallbackQueryHandler(cb_create_code_instant, pattern=r"^adm_code_instant$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_create_code),
+            ]
+        },
+        fallbacks=common_fallbacks,
+        allow_reentry=True,
+        per_message=False,
     )
     revoke_code_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_revoke_code_start, pattern=r"^adm_revoke_code$")],
         states={ADMIN_REVOKE_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_revoke_code)]},
-        fallbacks=[CommandHandler("cancel", admin_cancel)],
+        fallbacks=common_fallbacks,
+        allow_reentry=True,
+        per_message=False,
     )
     revoke_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_revoke_user_start, pattern=r"^adm_revoke_user$")],
         states={ADMIN_REVOKE_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_revoke_user)]},
-        fallbacks=[CommandHandler("cancel", admin_cancel)],
+        fallbacks=common_fallbacks,
+        allow_reentry=True,
+        per_message=False,
     )
     reset_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_reset_user_start, pattern=r"^adm_reset_user$")],
         states={ADMIN_RESET_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_reset_user)]},
-        fallbacks=[CommandHandler("cancel", admin_cancel)],
+        fallbacks=common_fallbacks,
+        allow_reentry=True,
+        per_message=False,
     )
     # API Store management
     add_store_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_add_store_start, pattern=r"^adm_add_store$")],
         states={ADMIN_ADD_STORE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_store_name)]},
-        fallbacks=[CommandHandler("cancel", admin_cancel)],
+        fallbacks=common_fallbacks,
+        allow_reentry=True,
+        per_message=False,
     )
     store_limit_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_store_limit_start, pattern=r"^store_limit:")],
         states={ADMIN_STORE_SET_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_store_set_limit)]},
-        fallbacks=[CommandHandler("cancel", admin_cancel)],
+        fallbacks=common_fallbacks,
+        allow_reentry=True,
+        per_message=False,
     )
     # User order limits
     user_limit_conv = ConversationHandler(
@@ -1095,7 +1171,9 @@ def get_admin_conversations() -> list[ConversationHandler]:
             ADMIN_SET_USER_LIMIT_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set_user_limit_id)],
             ADMIN_SET_USER_LIMIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set_user_limit_value)],
         },
-        fallbacks=[CommandHandler("cancel", admin_cancel)],
+        fallbacks=common_fallbacks,
+        allow_reentry=True,
+        per_message=False,
     )
 
     toggle_handler = CallbackQueryHandler(cb_toggle_power, pattern=r"^adm_toggle_power$")
