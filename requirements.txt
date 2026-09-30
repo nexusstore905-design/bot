@@ -1,4 +1,4 @@
-python-telegram-bot==21.6
+python-telegram-bot[rate-limiter]==21.6
 SQLAlchemy>=2.0.38
 sqlalchemy[asyncio]
 aiosqlite==0.20.0
@@ -6,4 +6,5 @@ bcrypt==4.2.0
 python-dotenv==1.0.1
 fastapi>=0.115.0
 uvicorn>=0.32.0
+a2wsgi>=1.10.10
 python-multipart>=0.0.12

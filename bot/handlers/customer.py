@@ -1,6 +1,7 @@
 """
 Customer order flow — no pricing shown, per-category supplier routing.
 """
+import html
 import logging
 from telegram import Update
 from telegram.ext import (
@@ -22,8 +23,9 @@ from bot.states.states import (
     ORDER_SELECT_CATEGORY, ORDER_SELECT_PRODUCT, ORDER_SELECT_QUANTITY,
     ORDER_CART_ACTION, ORDER_ENTER_PLAYER_ID, ORDER_CONFIRM,
 )
-from config.settings import SUPPLIER_CHAT_ID, STORE_NAME
+from config.settings import STORE_NAME
 from bot.keyboards.admin_kb import supplier_done_error_kb
+from utils.supplier_routing import resolve_supplier_chat
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,7 @@ STATUS_DISPLAY = {
 def _render_cart(cart: list) -> str:
     text = "<b>🛒 Your Shopping Cart</b>\n\n"
     for i, item in enumerate(cart, 1):
-        text += f"  {i}. <b>{item['product_name']}</b> x{item['quantity']}\n"
+        text += f"  {i}. <b>{html.escape(str(item['product_name']), quote=False)}</b> x{item['quantity']}\n"
     return text
 
 
@@ -105,7 +107,7 @@ async def cb_select_category(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"┌──────────────────────────┐\n"
         f"│  🛒  ADD TO CART            │\n"
         f"└──────────────────────────┘\n\n"
-        f"📂  <b>{category}</b>\n\n"
+        f"📂  <b>{html.escape(category, quote=False)}</b>\n\n"
         f"Select your package:",
         reply_markup=products_kb(products),
         parse_mode="HTML",
@@ -138,7 +140,7 @@ async def cb_select_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"┌──────────────────────────┐\n"
         f"│  🛒  ADD TO CART            │\n"
         f"└──────────────────────────┘\n\n"
-        f"✅  <b>{product.name}</b>\n\n"
+        f"✅  <b>{html.escape(product.name, quote=False)}</b>\n\n"
         f"How many do you want?",
         reply_markup=quantity_kb(),
         parse_mode="HTML",
@@ -286,8 +288,8 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  🆔  Order ID:  <b>{order.order_id}</b>\n"
     )
     for item in cart:
-        msg_text += f"      - {item['product_name']} x{item['quantity']}\n"
-    msg_text += f"\n  🎯  Player ID: <code>{player_id}</code>\n"
+        msg_text += f"      - {html.escape(str(item['product_name']), quote=False)} x{item['quantity']}\n"
+    msg_text += f"\n  🎯  Player ID: <code>{html.escape(player_id, quote=False)}</code>\n"
     msg_text += f"  ⏳  Status:    <b>PENDING</b>\n\n"
     msg_text += f"You will be notified once processed. Thank you! 🙏"
 
@@ -305,9 +307,8 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _forward_to_suppliers(context, order_id: str, cart_items: list, player_id: str):
     """
-    Route order items to the correct supplier group per category.
-    If a category has its own supplier_chat_id, use that.
-    Otherwise fall back to the global SUPPLIER_CHAT_ID from .env.
+    Route order items to the configured supplier group.
+    The global SUPPLIER_CHAT_ID takes priority; per-category IDs are a fallback.
     Groups items by category and sends one message per supplier group.
     """
     # Group cart items by category
@@ -324,7 +325,7 @@ async def _forward_to_suppliers(context, order_id: str, cart_items: list, player
         async with AsyncSessionLocal() as session:
             supplier_id = await ProductRepository(session).get_supplier_for_category(category)
 
-        target_chat = supplier_id or SUPPLIER_CHAT_ID
+        target_chat, route_source = resolve_supplier_chat(supplier_id)
         if not target_chat:
             logger.warning(f"No supplier configured for category '{category}' and no global supplier.")
             continue
@@ -363,8 +364,15 @@ async def _forward_to_suppliers(context, order_id: str, cart_items: list, player
                     if fresh:
                         await repo.set_supplier_msg(fresh, msg.message_id)
             sent_to.add(target_chat)
+            logger.info(
+                "Delivered order %s for category %s to supplier chat %s via %s routing",
+                order_id, category, target_chat, route_source,
+            )
         except Exception as e:
-            logger.error(f"Failed to send order to supplier {target_chat} for category '{category}': {e}")
+            logger.error(
+                "Failed to send order to supplier %s for category %s (%s)",
+                target_chat, category, type(e).__name__,
+            )
             # Alert the admin immediately so they know why an order didn't go through!
             from config.settings import ADMIN_IDS
             for admin_id in ADMIN_IDS:
@@ -375,7 +383,7 @@ async def _forward_to_suppliers(context, order_id: str, cart_items: list, player
                             f"⚠️ <b>SUPPLIER DELIVERY ALERT</b>\n\n"
                             f"Order: <b>{safe_order_id}</b> (Category: {safe_cat})\n"
                             f"Failed to deliver to Group ID: <code>{target_chat}</code>\n\n"
-                            f"<b>Telegram Error:</b> <code>{html.escape(str(e))}</code>\n\n"
+                            "<b>Telegram Error:</b> delivery failed; check the bot logs.\n\n"
                             f"👉 <i>Check that your bot is added as an <b>Administrator</b> in that group!</i>"
                         ),
                         parse_mode="HTML"
@@ -426,8 +434,8 @@ async def cmd_my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         icon, label, _ = STATUS_DISPLAY.get(order.status.value, ("❓", order.status.value, ""))
         text += f"{icon}  <b>{order.order_id}</b> — {label}\n"
         for item in order.items:
-            text += f"     • {item.product_name} x{item.quantity}\n"
-        text += f"     🎯 <code>{order.player_id}</code>\n\n"
+            text += f"     • {html.escape(item.product_name, quote=False)} x{item.quantity}\n"
+        text += f"     🎯 <code>{html.escape(order.player_id, quote=False)}</code>\n\n"
 
     await msg.reply_text(text, parse_mode="HTML", reply_markup=main_menu_kb())
 

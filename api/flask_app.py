@@ -1,11 +1,12 @@
-import os
 import json
+import html
 import secrets
 import asyncio
 import logging
 from flask import Flask, request, jsonify
 
-from config.settings import API_KEY, SUPPLIER_CHAT_ID, BOT_TOKEN
+from config.settings import API_KEY, BOT_TOKEN
+from utils.supplier_routing import resolve_supplier_chat
 from database.database import AsyncSessionLocal
 from database.repositories.order_repo import OrderRepository
 from database.repositories.product_repo import ProductRepository
@@ -36,11 +37,11 @@ def run_async(coro):
 def authenticate_request():
     api_key = request.headers.get("X-API-Key", "").strip()
     if not api_key:
-        return False, ("Missing X-API-Key header", 401)
+        return False, ("Missing X-API-Key header", 401), None
     
     # 1. Master key check
     if API_KEY and secrets.compare_digest(api_key, API_KEY):
-        return True, None
+        return True, None, None
         
     # 2. Per-store key check
     async def _check_store():
@@ -48,24 +49,23 @@ def authenticate_request():
             store_repo = ApiStoreRepository(session)
             store = await store_repo.get_by_api_key(api_key)
             if not store:
-                return False, ("Invalid API Key", 401)
+                return False, ("Invalid API Key", 401), None
             if not store.is_active:
-                return False, (f"API store '{store.name}' is disabled by admin", 403)
-            allowed, reason = await store_repo.check_and_increment(store)
-            if not allowed:
-                return False, (reason, 429)
-            return True, None
+                return False, (f"API store '{store.name}' is disabled by admin", 403), None
+            return True, None, store.id
             
     return run_async(_check_store())
 
 
 @app.route("/orders/", methods=["POST"])
 def create_order():
-    auth_ok, auth_err = authenticate_request()
+    auth_ok, auth_err, api_store_id = authenticate_request()
     if not auth_ok:
         return jsonify({"detail": auth_err[0]}), auth_err[1]
         
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"detail": "Request body must be a JSON object"}), 400
     telegram_user_id = data.get("telegram_user_id")
     product_id = data.get("product_id")
     player_id = str(data.get("player_id", "")).strip()
@@ -75,15 +75,14 @@ def create_order():
         
     if not (player_id.startswith("5") and player_id.isdigit() and 5 <= len(player_id) <= 16):
         return jsonify({"detail": "Invalid player_id. Must start with 5 and be numeric"}), 400
+    try:
+        telegram_user_id = int(telegram_user_id)
+        product_id = int(product_id)
+    except (TypeError, ValueError):
+        return jsonify({"detail": "telegram_user_id and product_id must be integers"}), 400
 
     async def _process():
         async with AsyncSessionLocal() as session:
-            # Check user limit
-            limit_repo = UserOrderLimitRepository(session)
-            allowed, reason = await limit_repo.check_and_increment(int(telegram_user_id))
-            if not allowed:
-                return None, (reason, 429)
-                
             # Verify user
             user_repo = UserRepository(session)
             user = await user_repo.get_by_telegram_id(int(telegram_user_id))
@@ -95,10 +94,27 @@ def create_order():
             product = await product_repo.get_by_id(int(product_id))
             if not product or not product.is_active:
                 return None, ("Invalid or inactive product ID", 400)
-                
+
             supplier_id = await product_repo.get_supplier_for_category(product.category)
-            target_chat = supplier_id or SUPPLIER_CHAT_ID
-            
+            target_chat, route_source = resolve_supplier_chat(supplier_id)
+            if not target_chat:
+                return None, ("No supplier is configured for this product", 503)
+
+            # Count only validated order submissions. These reservations are
+            # committed together with the order below.
+            limit_repo = UserOrderLimitRepository(session)
+            allowed, reason = await limit_repo.check_and_increment(telegram_user_id)
+            if not allowed:
+                return None, (reason, 429)
+            if api_store_id is not None:
+                store_repo = ApiStoreRepository(session)
+                store = await store_repo.get_by_id(api_store_id)
+                if not store:
+                    return None, ("API store is no longer available", 401)
+                allowed, reason = await store_repo.check_and_increment(store)
+                if not allowed:
+                    return None, (reason, 429)
+                
             # Create order
             order_repo = OrderRepository(session)
             order = await order_repo.create(
@@ -106,7 +122,8 @@ def create_order():
                 product_id=product.id,
                 product_name=product.name,
                 quantity=1,
-                player_id=player_id
+                player_id=player_id,
+                api_store_id=api_store_id,
             )
             order_id = order.order_id
             created_at_iso = order.created_at.isoformat()
@@ -121,20 +138,24 @@ def create_order():
             "player_id": player_id,
             "created_at": created_at_iso,
             "target_chat": target_chat,
-            "category": prod_cat
+            "route_source": route_source,
+            "category": prod_cat,
+            "api_store_id": api_store_id,
         }, None
 
     result, err = run_async(_process())
     if err:
         return jsonify({"detail": err[0]}), err[1]
         
-    # Send Telegram notification to supplier chat
+    # Send Telegram notification to supplier chat.
     target_chat = result.pop("target_chat", None)
+    route_source = result.pop("route_source", "unconfigured")
     prod_cat = result.pop("category", "")
+    result.pop("api_store_id", None)
+    supplier_notified = False
     if target_chat and BOT_TOKEN:
         try:
             import urllib.request
-            import html
             safe_order_id = html.escape(str(result['order_id']))
             safe_prod_name = html.escape(str(result['product_name']))
             safe_cat = html.escape(str(prod_cat))
@@ -179,8 +200,13 @@ def create_order():
                             if o:
                                 await repo.set_supplier_msg(o, msg_id)
                     run_async(_save_msg())
+            supplier_notified = True
+            logger.info(
+                "Delivered Flask API order %s to supplier chat %s via %s routing",
+                result["order_id"], target_chat, route_source,
+            )
         except Exception as e:
-            logger.error(f"Failed to forward API order to supplier: {e}")
+            logger.error("Failed to forward API order to supplier (%s)", type(e).__name__)
             from config.settings import ADMIN_IDS
             for admin_id in ADMIN_IDS:
                 try:
@@ -188,9 +214,10 @@ def create_order():
                         "chat_id": admin_id,
                         "text": (
                             f"⚠️ <b>API ORDER DELIVERY FAILED</b>\n\n"
-                            f"Order: <b>{safe_order_id}</b> (Category: {safe_cat})\n"
+                            f"Order: <b>{html.escape(str(result['order_id']))}</b> "
+                            f"(Category: {html.escape(str(prod_cat))})\n"
                             f"Target Chat: <code>{target_chat}</code>\n\n"
-                            f"<b>Telegram Error:</b> <code>{html.escape(str(e))}</code>\n\n"
+                            "<b>Telegram Error:</b> delivery failed; check the bot logs.\n\n"
                             f"👉 <i>Make sure the bot is an Administrator in that group!</i>"
                         ),
                         "parse_mode": "HTML"
@@ -204,19 +231,37 @@ def create_order():
                 except Exception:
                     pass
 
+    if not supplier_notified:
+        async def _mark_failed():
+            async with AsyncSessionLocal() as session:
+                repo = OrderRepository(session)
+                failed_order = await repo.get_by_order_id(result["order_id"])
+                if failed_order:
+                    from database.models import OrderStatus
+                    await repo.update_status(
+                        failed_order,
+                        OrderStatus.failed,
+                        changed_by="api",
+                        note="Supplier notification failed; manual follow-up is required.",
+                    )
+        run_async(_mark_failed())
+        result["status"] = "failed"
+
+    result["supplier_notified"] = supplier_notified
+
     return jsonify(result), 200
 
 
 @app.route("/orders/<order_id>", methods=["GET"])
 def get_order_status(order_id):
-    auth_ok, auth_err = authenticate_request()
+    auth_ok, auth_err, api_store_id = authenticate_request()
     if not auth_ok:
         return jsonify({"detail": auth_err[0]}), auth_err[1]
 
     async def _fetch():
         async with AsyncSessionLocal() as session:
             repo = OrderRepository(session)
-            order = await repo.get_by_order_id(order_id)
+            order = await repo.get_by_order_id(order_id, api_store_id=api_store_id)
             if not order:
                 return None
             return {"order_id": order.order_id, "status": order.status.value}

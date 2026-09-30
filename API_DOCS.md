@@ -1,150 +1,88 @@
-# 🚀 Nexus Store REST API Documentation
+# Nexus Store REST API
 
-The Nexus Store REST API allows you to integrate your Telegram bot's ordering system with external websites, web panels, or other applications.
+The API creates a fulfillment order and sends it to the configured supplier. It does **not** set product prices, collect payment, or verify payment. An external website must collect and verify payment before it calls `POST /orders/`.
 
----
+Use HTTPS when the API is reachable over the internet.
 
-## 🔐 Authentication
+## Run the API locally
 
-All API requests require an **API Key** passed in the headers.
-You can find or change your API Key in the `.env` file (variable `API_KEY`) or by tapping **🔑 API Settings** inside the bot's Admin Panel.
-
-**Header Format:**
-```http
-X-API-Key: your-secret-api-key-here
-```
-
----
-
-## 📦 1. Create a New Order
-
-Place a new order on behalf of a user. The order will be immediately sent to the Supplier Group in Telegram with the **DONE / ERROR** inline buttons.
-
-- **Endpoint:** `POST /orders/`
-- **Content-Type:** `application/json`
-
-### Request Body
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `telegram_user_id` | `integer` | The Telegram ID of the user (they must have started the bot at least once so they exist in the DB). |
-| `product_id` | `integer` | The ID of the product they are purchasing (viewable in Admin Panel -> Products). |
-| `player_id` | `string` | The PUBG Player ID (3 to 16 characters). |
-
-### 🟢 Example: cURL
+The Telegram bot and API are separate processes. From the `nexus_bot` folder, run:
 
 ```bash
-curl -X POST "http://your-domain.com/orders/" \
-     -H "X-API-Key: my_secret_key" \
-     -H "Content-Type: application/json" \
-     -d '{
-           "telegram_user_id": 6072311425,
-           "product_id": 2,
-           "player_id": "5123456789"
-         }'
+python run_api.py
 ```
 
-### 🐍 Example: Python (`requests`)
+The server binds to `API_HOST` and `API_PORT` from `.env` (defaults: `0.0.0.0:8000`). `0.0.0.0` is a bind address, not the URL a client should call. Use the machine's reachable hostname/IP, and put HTTPS in front of the service when exposing it to the internet. Keep the Telegram bot running separately so supplier order buttons can be handled.
 
-```python
-import requests
+Check service and database availability with `GET /health`; it does not require an API key and returns `503` if the database cannot be reached.
 
-url = "http://your-domain.com/orders/"
-headers = {
-    "X-API-Key": "my_secret_key",
-    "Content-Type": "application/json"
-}
-data = {
-    "telegram_user_id": 6072311425,
-    "product_id": 2,
-    "player_id": "5123456789"
-}
+## Authentication
 
-response = requests.post(url, json=data, headers=headers)
-print(response.json())
+Send an API key in the `X-API-Key` header. The admin panel can create separate API store keys. A key created for one store can view only orders created with that same key; it cannot view Telegram orders or another store's orders.
+
+An optional master key can be set as `API_KEY` in `.env`. It has access to all order statuses and is not quota-limited. There is no built-in default master key: leave it blank to use per-store keys only. If you set it, use a long random secret and keep it private.
+
+Per-store daily limits count valid order submissions. Checking an order's status does not use the order quota. Set `API_CORS_ORIGINS` to a comma-separated list of exact browser origins if browser-based clients need CORS access; by default, cross-origin browser access is disabled.
+
+## Create an order
+
+`POST /orders/` accepts JSON:
+
+| Field | Type | Description |
+|---|---|---|
+| `telegram_user_id` | integer | User must already exist in the bot database. |
+| `product_id` | integer | Active product ID. |
+| `player_id` | string | 5–16 digits, starting with `5`. |
+
+Example:
+
+```bash
+curl -X POST "https://your-domain.example/orders/" \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"telegram_user_id": 6072311425, "product_id": 2, "player_id": "5123456789"}'
 ```
 
-### ✅ Successful Response (`200 OK`)
+Successful response (`200 OK`):
 
 ```json
 {
   "order_id": "NX482910",
   "status": "pending",
   "product_name": "325 UC",
-  "unit_price": 4.99,
   "player_id": "5123456789",
-  "created_at": "2023-10-25T14:30:00.000Z"
+  "created_at": "2026-09-30T12:30:00+00:00",
+  "supplier_notified": true
 }
 ```
 
----
+The product catalogue in `nexus_bot` has no price field. The API response therefore does not include a price. This endpoint submits an order for fulfillment; it does not represent payment confirmation. If `supplier_notified` is `false`, the order is saved with `failed` status and needs manual follow-up. Do not blindly resubmit it, since that can create a second order.
 
-## 🔍 2. Check Order Status
+## Check order status
 
-Retrieve the current status of an existing order.
-
-- **Endpoint:** `GET /orders/{order_id}`
-- **Parameters:** `order_id` (string) — The unique `NX...` order ID.
-
-### 🟢 Example: cURL
+`GET /orders/{order_id}` returns the order status. A per-store key can only check its own API orders. A master key can check all orders.
 
 ```bash
-curl -X GET "http://your-domain.com/orders/NX482910" \
-     -H "X-API-Key: my_secret_key"
+curl "https://your-domain.example/orders/NX482910" \
+  -H "X-API-Key: YOUR_API_KEY"
 ```
 
-### 🐍 Example: Python (`requests`)
-
-```python
-import requests
-
-url = "http://your-domain.com/orders/NX482910"
-headers = {"X-API-Key": "my_secret_key"}
-
-response = requests.get(url, headers=headers)
-print(response.json())
-```
-
-### ✅ Successful Response (`200 OK`)
+Response:
 
 ```json
 {
   "order_id": "NX482910",
-  "status": "completed"
+  "status": "pending"
 }
 ```
 
-*Note: Possible statuses are `pending`, `processing`, `completed`, `failed`, `cancelled`.*
+Possible statuses are `pending`, `processing`, `completed`, `failed`, and `cancelled`.
 
----
+## Errors
 
-## ❌ Error Responses
-
-If something goes wrong, the API returns a JSON error detail.
-
-**401 Unauthorized (Missing or Invalid API Key)**
-```json
-{
-  "detail": "Invalid or missing API Key"
-}
-```
-
-**400 Bad Request (User not found / Invalid Product)**
-```json
-{
-  "detail": "User not found in system. They must use the bot at least once."
-}
-```
-
-**422 Unprocessable Entity (Validation Error - e.g. Player ID too short)**
-```json
-{
-  "detail": [
-    {
-      "loc": ["body", "player_id"],
-      "msg": "ensure this value has at least 3 characters",
-      "type": "value_error.any_str.min_length"
-    }
-  ]
-}
-```
+- `401`: missing or invalid API key.
+- `403`: the API store key has been disabled.
+- `404`: order not found or not visible to this API store.
+- `429`: per-user or per-store order limit reached.
+- `503`: no supplier is configured for the selected product.
+- `422`: invalid request field, including an invalid player ID.

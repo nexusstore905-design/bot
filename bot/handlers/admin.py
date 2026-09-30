@@ -33,6 +33,7 @@ from bot.states.states import (
     ADMIN_ADD_STORE_NAME, ADMIN_STORE_SET_LIMIT,
     ADMIN_SET_USER_LIMIT_ID, ADMIN_SET_USER_LIMIT_VALUE,
 )
+from utils.supplier_routing import resolve_supplier_chat
 
 
 logger = logging.getLogger(__name__)
@@ -370,6 +371,7 @@ async def cb_set_supplier_start(update: Update, context: ContextTypes.DEFAULT_TY
         return ConversationHandler.END
 
     lines = ["📡  <b>Set Supplier Group per Category</b>\n\n"
+             "<b>Routing priority:</b> If <code>SUPPLIER_CHAT_ID</code> is set in this app's .env, it receives orders for every category. Category IDs are used only when the global ID is blank.\n\n"
              "Reply with:\n<code>CATEGORY | CHAT_ID</code>\n\n"
              "Examples:\n"
              "  <code>PUBG UC | -1001234567890</code>\n"
@@ -432,33 +434,40 @@ async def admin_set_supplier_value(update: Update, context: ContextTypes.DEFAULT
         )
         return ConversationHandler.END
 
-    # Live verification test
+    # Test the same destination that order delivery will currently select.
+    target_chat, route_source = resolve_supplier_chat(supplier_chat_id)
     test_ok = False
     test_err = ""
     try:
         await context.bot.send_message(
-            chat_id=supplier_chat_id,
+            chat_id=target_chat,
             text=(
                 f"🤖  <b>SUPPLIER GROUP CONNECTED</b>\n\n"
-                f"✅ This group is now successfully linked to receive orders for:\n"
-                f"📂 Category: <b>{html.escape(matched_cat)}</b>"
+                f"✅ This is the active destination for orders in:\n"
+                f"📂 Category: <b>{html.escape(matched_cat)}</b>\n"
+                f"🧭 Routing: <b>{route_source}</b>"
             ),
             parse_mode="HTML"
         )
         test_ok = True
     except Exception as e:
         test_err = str(e)
-        logger.warning(f"Test message to {supplier_chat_id} failed: {e}")
+        logger.warning("Supplier test message to %s failed (%s)", target_chat, type(e).__name__)
 
     if test_ok:
+        category_note = (
+            f"📝  Category ID saved: <code>{supplier_chat_id}</code> (used when the global ID is blank)\n"
+            if route_source == "global" else ""
+        )
         await update.message.reply_text(
             f"━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"  ✅  <b>SUPPLIER GROUP LINKED</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📂  Category: <b>{html.escape(matched_cat)}</b>\n"
-            f"📡  Supplier Chat ID: <code>{supplier_chat_id}</code>\n"
+            f"📡  Active Supplier Chat ID: <code>{target_chat}</code> (<b>{route_source}</b>)\n"
+            f"{category_note}"
             f"📦  Products Updated: <b>{count}</b>\n\n"
-            f"🎉 <b>Test message sent successfully!</b> The group is fully ready to receive orders.",
+            f"🎉 <b>Test message sent to the active order destination.</b>",
             parse_mode="HTML", reply_markup=admin_products_kb()
         )
     else:
@@ -467,7 +476,7 @@ async def admin_set_supplier_value(update: Update, context: ContextTypes.DEFAULT
             f"  ⚠️  <b>SAVED BUT NOT REACHABLE</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📂  Category: <b>{html.escape(matched_cat)}</b>\n"
-            f"📡  Chat ID: <code>{supplier_chat_id}</code>\n\n"
+            f"📡  Active destination: <code>{target_chat}</code> (<b>{route_source}</b>)\n\n"
             f"❌  <b>Telegram Error:</b> <code>{html.escape(test_err)}</code>\n\n"
             f"<b>👉 IMPORTANT:</b>\n"
             f"1. Make sure your bot is added to that group!\n"
@@ -563,6 +572,10 @@ async def cb_remove_product_confirm(update: Update, context: ContextTypes.DEFAUL
 async def cb_admin_api_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from config.settings import API_KEY, API_HOST, API_PORT
     await update.callback_query.answer()
+    key_status = (
+        "Configured (hidden in this panel)"
+        if API_KEY else "Not configured; use per-store API keys"
+    )
     
     await update.callback_query.message.reply_text(
         f"┌──────────────────────────┐\n"
@@ -570,11 +583,14 @@ async def cb_admin_api_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"└──────────────────────────┘\n\n"
         f"Use the REST API to manage orders from\n"
         f"external platforms or web panels.\n\n"
-        f"🌐  <b>Host:</b> <code>{API_HOST}</code>\n"
+        f"🌐  <b>Bind address:</b> <code>{html.escape(API_HOST)}</code>\n"
         f"🔌  <b>Port:</b> <code>{API_PORT}</code>\n"
         f"🔐  <b>API Key:</b>\n"
-        f"<code>{API_KEY}</code>\n\n"
+        f"{key_status}\n\n"
         f"<i>Pass this key in the <code>X-API-Key</code> header.</i>\n\n"
+        f"The API listener runs separately from the Telegram bot.\n"
+        f"Start it from the <code>nexus_bot</code> folder with <code>python run_api.py</code>.\n"
+        f"Use your public domain/IP for client requests; <code>0.0.0.0</code> is only a bind address.\n\n"
         f"<b>Endpoints:</b>\n"
         f"<code>POST /orders/</code> - Create order\n"
         f"<code>GET /orders/{{id}}</code> - Check status",
@@ -834,7 +850,7 @@ async def admin_add_store_name(update: Update, context: ContextTypes.DEFAULT_TYP
         store = await repo.create(name=name, daily_limit=0)
 
     await update.message.reply_text(
-        f"✅  Store <b>{store.name}</b> created!\n\n"
+        f"✅  Store <b>{html.escape(store.name)}</b> created!\n\n"
         f"🔑  API Key:\n<code>{store.api_key}</code>\n\n"
         f"📊  Daily Limit: <b>Unlimited</b>\n\n"
         f"⚠️  Save this key now! It won't be shown again in full.",
@@ -899,7 +915,7 @@ async def cb_store_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.callback_query.message.reply_text(
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"  🏪  <b>{store.name}</b>\n"
+        f"  🏪  <b>{html.escape(store.name)}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"  📌  Status:      <b>{status}</b>\n"
         f"  🔑  Key:         <code>{key_preview}</code>\n"
@@ -928,7 +944,7 @@ async def cb_store_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             status = "🟢 Active" if store.is_active else "🔴 Disabled"
             await update.callback_query.message.edit_text(
                 f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"  🏪  <b>{store.name}</b>\n"
+                f"  🏪  <b>{html.escape(store.name)}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"  📌  Status:      <b>{status}</b>\n"
                 f"  🔑  Key:         <code>{key_preview}</code>\n"

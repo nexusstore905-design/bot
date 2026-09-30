@@ -18,6 +18,7 @@ class OrderRepository:
         product_name: str,
         quantity: int,
         player_id: str,
+        api_store_id: int | None = None,
     ) -> Order:
         # Generate unique order ID
         for _ in range(10):
@@ -29,6 +30,7 @@ class OrderRepository:
         order = Order(
             order_id=oid,
             user_id=user_id,
+            api_store_id=api_store_id,
             player_id=player_id,
             status=OrderStatus.pending,
         )
@@ -100,10 +102,12 @@ class OrderRepository:
         await self.session.refresh(order)
         return order
 
-    async def get_by_order_id(self, order_id: str) -> Order | None:
+    async def get_by_order_id(self, order_id: str, api_store_id: int | None = None) -> Order | None:
+        statement = select(Order).where(Order.order_id == order_id)
+        if api_store_id is not None:
+            statement = statement.where(Order.api_store_id == api_store_id)
         result = await self.session.execute(
-            select(Order)
-            .where(Order.order_id == order_id)
+            statement
             .options(selectinload(Order.items), selectinload(Order.history), selectinload(Order.user))
         )
         return result.scalar_one_or_none()

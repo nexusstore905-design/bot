@@ -145,7 +145,13 @@ async def cb_supplier_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 def get_supplier_handlers() -> list:
-    return [
-        MessageHandler(filters.Chat(SUPPLIER_CHAT_ID) & filters.TEXT & ~filters.COMMAND, handle_supplier_message),
-        CallbackQueryHandler(cb_supplier_action, pattern=r"^sup_(done|error):"),
-    ]
+    handlers = [CallbackQueryHandler(cb_supplier_action, pattern=r"^sup_(done|error):")]
+    if SUPPLIER_CHAT_ID:
+        handlers.insert(
+            0,
+            MessageHandler(
+                filters.Chat(SUPPLIER_CHAT_ID) & filters.TEXT & ~filters.COMMAND,
+                handle_supplier_message,
+            ),
+        )
+    return handlers

@@ -2,23 +2,15 @@
 Repository for API Store management and User Order Limits.
 """
 import secrets
-from datetime import datetime, timezone, timedelta
-from sqlalchemy import select, func
+from datetime import datetime, timezone
+from sqlalchemy import select, func, update, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import ApiStore, UserOrderLimit, Order
+from database.models import ApiStore, UserOrderLimit
 
 
 def _utcnow():
     return datetime.now(timezone.utc)
-
-
-def _is_same_day(dt: datetime | None) -> bool:
-    """Check if the given datetime is today (UTC)."""
-    if dt is None:
-        return False
-    now = _utcnow()
-    return dt.date() == now.date()
 
 
 class ApiStoreRepository:
@@ -53,6 +45,9 @@ class ApiStoreRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_id(self, store_id: int) -> ApiStore | None:
+        return await self.session.get(ApiStore, store_id)
+
     async def get_all(self) -> list[ApiStore]:
         result = await self.session.execute(
             select(ApiStore).order_by(ApiStore.created_at.desc())
@@ -79,18 +74,34 @@ class ApiStoreRepository:
         if not store.is_active:
             return False, "This API store is disabled by admin."
 
-        # Reset daily counter if it's a new day
-        if not _is_same_day(store.last_reset):
-            store.orders_today = 0
-            store.last_reset = _utcnow()
+        now = _utcnow()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        await self.session.execute(
+            update(ApiStore)
+            .where(
+                ApiStore.id == store.id,
+                or_(ApiStore.last_reset.is_(None), ApiStore.last_reset < day_start),
+            )
+            .values(orders_today=0, last_reset=day_start)
+        )
+        result = await self.session.execute(
+            update(ApiStore)
+            .where(
+                ApiStore.id == store.id,
+                ApiStore.is_active.is_(True),
+                or_(ApiStore.daily_limit == 0, ApiStore.orders_today < ApiStore.daily_limit),
+            )
+            .values(orders_today=ApiStore.orders_today + 1)
+        )
+        if result.rowcount == 1:
+            # Leave the update in the caller's transaction. The order and its
+            # quota reservation are committed together by OrderRepository.
+            return True, "OK"
 
-        # Check limit (0 = unlimited)
-        if store.daily_limit > 0 and store.orders_today >= store.daily_limit:
-            return False, f"Daily order limit reached ({store.daily_limit}/{store.daily_limit})."
-
-        store.orders_today += 1
-        await self.session.commit()
-        return True, "OK"
+        await self.session.refresh(store)
+        if not store.is_active:
+            return False, "This API store is disabled by admin."
+        return False, f"Daily order limit reached ({store.daily_limit}/{store.daily_limit})."
 
 
 class UserOrderLimitRepository:
@@ -159,14 +170,25 @@ class UserOrderLimitRepository:
         if limit.daily_limit == 0:
             return False, "Your ordering is currently disabled by admin."
 
-        # Reset daily counter if it's a new day
-        if not _is_same_day(limit.last_reset):
-            limit.orders_today = 0
-            limit.last_reset = _utcnow()
-
-        if limit.orders_today >= limit.daily_limit:
-            return False, f"You have reached your daily order limit ({limit.daily_limit} orders/day)."
-
-        limit.orders_today += 1
-        await self.session.commit()
-        return True, "OK"
+        now = _utcnow()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        await self.session.execute(
+            update(UserOrderLimit)
+            .where(
+                UserOrderLimit.id == limit.id,
+                or_(UserOrderLimit.last_reset.is_(None), UserOrderLimit.last_reset < day_start),
+            )
+            .values(orders_today=0, last_reset=day_start)
+        )
+        result = await self.session.execute(
+            update(UserOrderLimit)
+            .where(
+                UserOrderLimit.id == limit.id,
+                UserOrderLimit.daily_limit > UserOrderLimit.orders_today,
+            )
+            .values(orders_today=UserOrderLimit.orders_today + 1)
+        )
+        if result.rowcount == 1:
+            # The caller commits this reservation with the order record.
+            return True, "OK"
+        return False, f"You have reached your daily order limit ({limit.daily_limit} orders/day)."

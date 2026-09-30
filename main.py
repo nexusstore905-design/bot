@@ -45,6 +45,11 @@ async def main():
     async with AsyncSessionLocal() as session:
         await ProductRepository(session).seed_defaults()
     logger.info("Database ready.")
+    logger.info(
+        "Supplier routing: %s destination configured%s",
+        "global" if SUPPLIER_CHAT_ID else "no global",
+        "; it takes priority over category destinations" if SUPPLIER_CHAT_ID else "; category destinations are used when set",
+    )
 
     # 2. Build bot app with Rate Limiting (Outbound DDoS protection)
     from telegram.ext import AIORateLimiter
@@ -61,9 +66,8 @@ async def main():
     app.add_handler(get_order_conversation())
 
     # 6. Supplier message handler (both text and inline buttons)
-    if SUPPLIER_CHAT_ID:
-        for handler in get_supplier_handlers():
-            app.add_handler(handler)
+    for handler in get_supplier_handlers():
+        app.add_handler(handler)
 
     # 7. Commands
     app.add_handler(CommandHandler("logout", cmd_logout))

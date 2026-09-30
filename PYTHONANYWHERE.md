@@ -24,7 +24,9 @@ Hosting this system on PythonAnywhere requires running **two things**:
    mkvirtualenv --python=/usr/bin/python3.10 nexus_venv
    pip install -r requirements.txt
    ```
-3. Make sure your `.env` file is fully configured with your `BOT_TOKEN`, `ADMIN_IDS`, `SUPPLIER_CHAT_ID`, and `API_KEY`.
+3. Make sure your `.env` file is configured with your `BOT_TOKEN`, `ADMIN_IDS`, and `SUPPLIER_CHAT_ID`. `API_KEY` is optional when using per-store keys; if you enable the master key, set a long random value. Set `API_CORS_ORIGINS` only when browser clients need access from specific origins.
+
+On the first database upgrade that adds API-store order scoping, the app creates `nexus_bot.db.pre-api-store-scope.bak` beside the SQLite database before applying the additive schema change.
 
 ---
 
@@ -82,10 +84,10 @@ application = ASGIMiddleware(app)
 *(Make sure to change `YOUR_USERNAME`!)*
 
 8. Save the file.
-9. *Important:* Because PythonAnywhere uses WSGI, you need to install the `a2wsgi` adapter. Go back to your Bash console and run:
+9. Install project requirements (this includes the `a2wsgi` adapter used above):
    ```bash
    workon nexus_venv
-   pip install a2wsgi
+   pip install -r /home/YOUR_USERNAME/nexus_bot/requirements.txt
    ```
 10. Go back to the **Web** tab and click the big green **Reload** button.
 
