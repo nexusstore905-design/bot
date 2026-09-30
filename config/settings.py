@@ -1,7 +1,9 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+env_path = os.path.join(BASE_DIR, '.env')
+load_dotenv(env_path)
 
 
 def _require(key: str) -> str:
@@ -27,7 +29,6 @@ BINANCE_ID: str = os.getenv("BINANCE_ID", "")
 MAX_PIN_ATTEMPTS: int = int(os.getenv("MAX_PIN_ATTEMPTS", "5"))
 LOCKOUT_MINUTES: int = int(os.getenv("LOCKOUT_MINUTES", "30"))
 SESSION_HOURS: int = int(os.getenv("SESSION_HOURS", "0"))
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATABASE_URL: str = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{os.path.join(BASE_DIR, 'nexus_bot.db')}")
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
