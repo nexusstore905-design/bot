@@ -1,4 +1,6 @@
-from sqlalchemy import select, func, desc
+from datetime import datetime
+
+from sqlalchemy import select, func, desc, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -143,10 +145,17 @@ class OrderRepository:
 
     async def update_status(
         self, order: Order, new_status: OrderStatus, changed_by: str = "system", note: str | None = None
-    ) -> None:
+    ) -> bool:
         old_status = order.status.value if order.status else None
-        order.status = new_status
-        order.updated_at = utcnow()
+        updated_at = utcnow()
+        result = await self.session.execute(
+            update(Order)
+            .where(Order.id == order.id, Order.status == order.status)
+            .values(status=new_status, updated_at=updated_at)
+        )
+        if result.rowcount != 1:
+            await self.session.refresh(order)
+            return False
 
         history = OrderStatusHistory(
             order_id=order.id,
@@ -157,6 +166,46 @@ class OrderRepository:
         )
         self.session.add(history)
         await self.session.commit()
+        return True
+
+    async def cancel_stale_pending(self, older_than: datetime) -> list[tuple[str, int]]:
+        """Atomically cancel pending orders older than a cutoff and return customer IDs."""
+        result = await self.session.execute(
+            select(Order)
+            .where(Order.status == OrderStatus.pending, Order.created_at <= older_than)
+            .options(selectinload(Order.user))
+        )
+        candidates = list(result.scalars().all())
+        if not candidates:
+            return []
+
+        cancelled: list[tuple[str, int]] = []
+        updated_at = utcnow()
+        for order in candidates:
+            update_result = await self.session.execute(
+                update(Order)
+                .where(
+                    Order.id == order.id,
+                    Order.status == OrderStatus.pending,
+                    Order.created_at <= older_than,
+                )
+                .values(status=OrderStatus.cancelled, updated_at=updated_at)
+            )
+            if update_result.rowcount != 1:
+                continue
+
+            self.session.add(OrderStatusHistory(
+                order_id=order.id,
+                old_status=OrderStatus.pending.value,
+                new_status=OrderStatus.cancelled.value,
+                changed_by="auto_cancel",
+                note="Automatically cancelled after 10 minutes without supplier action.",
+            ))
+            cancelled.append((order.order_id, order.user.telegram_id))
+
+        if cancelled:
+            await self.session.commit()
+        return cancelled
 
     async def set_supplier_msg(self, order: Order, msg_id: int) -> None:
         order.supplier_msg_id = msg_id

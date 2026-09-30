@@ -4,17 +4,9 @@ The API creates a fulfillment order and sends it to the configured supplier. It 
 
 Use HTTPS when the API is reachable over the internet.
 
-## Run the API locally
+## Check API health
 
-The Telegram bot and API are separate processes. From the `nexus_bot` folder, run:
-
-```bash
-python run_api.py
-```
-
-The server binds to `API_HOST` and `API_PORT` from `.env` (defaults: `0.0.0.0:8000`). `0.0.0.0` is a bind address, not the URL a client should call. Use the machine's reachable hostname/IP, and put HTTPS in front of the service when exposing it to the internet. Keep the Telegram bot running separately so supplier order buttons can be handled.
-
-Check service and database availability with `GET /health`; it does not require an API key and returns `503` if the database cannot be reached.
+`GET /health` checks that the Flask API can reach its database. It does not require an API key and returns `503` if the database cannot be reached.
 
 ## Authentication
 

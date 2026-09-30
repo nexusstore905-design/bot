@@ -4,8 +4,9 @@ import secrets
 import asyncio
 import logging
 from flask import Flask, request, jsonify
+from sqlalchemy import text
 
-from config.settings import API_KEY, BOT_TOKEN
+from config.settings import API_KEY, API_CORS_ORIGINS, BOT_TOKEN
 from utils.supplier_routing import resolve_supplier_chat
 from database.database import AsyncSessionLocal
 from database.repositories.order_repo import OrderRepository
@@ -18,6 +19,20 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin")
+    if origin and origin in API_CORS_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key"
+        vary_values = [value.strip() for value in response.headers.get("Vary", "").split(",") if value.strip()]
+        if "Origin" not in vary_values:
+            vary_values.append("Origin")
+        response.headers["Vary"] = ", ".join(vary_values)
+    return response
+
+
 @app.route("/", methods=["GET"])
 def index():
     return jsonify({
@@ -28,6 +43,21 @@ def index():
             "GET /orders/<order_id>": "Check status"
         }
     })
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    """Check that the Flask API can reach its database."""
+    async def _check_database():
+        async with AsyncSessionLocal() as session:
+            await session.execute(text("SELECT 1"))
+
+    try:
+        run_async(_check_database())
+    except Exception as exc:
+        logger.error("Flask API health check failed (%s)", type(exc).__name__)
+        return jsonify({"status": "error", "database": "unavailable"}), 503
+    return jsonify({"status": "ok", "database": "ok"}), 200
 
 
 def run_async(coro):

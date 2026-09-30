@@ -18,19 +18,28 @@ STATUS_ICONS = {
 }
 
 
-async def _process_supplier_action(context: ContextTypes.DEFAULT_TYPE, order_id: str, new_status: OrderStatus, changed_by: str) -> tuple[bool, str, int, str]:
+async def _process_supplier_action(context: ContextTypes.DEFAULT_TYPE, order_id: str, new_status: OrderStatus, changed_by: str) -> tuple[bool, str, int, str, str]:
     """Updates order status and returns (success, message, customer_id, product_name, player_id)."""
     async with AsyncSessionLocal() as session:
         repo = OrderRepository(session)
         order = await repo.get_by_order_id(order_id)
 
         if order is None:
-            return False, f"⚠️ Order <b>{order_id}</b> not found.", 0, ""
+            return False, f"⚠️ Order <b>{order_id}</b> not found.", 0, "", ""
 
         if order.status not in (OrderStatus.pending, OrderStatus.processing):
-            return False, f"⚠️ Order <b>{order_id}</b> is already <b>{order.status.value}</b>.", 0, ""
+            return False, f"⚠️ Order <b>{order_id}</b> is already <b>{order.status.value}</b>.", 0, "", ""
 
-        await repo.update_status(order, new_status, changed_by=changed_by)
+        updated = await repo.update_status(order, new_status, changed_by=changed_by)
+        if not updated:
+            current_status = order.status.value if order.status else "changed"
+            return (
+                False,
+                f"⚠️ Order <b>{order_id}</b> was already changed to <b>{current_status}</b>.",
+                0,
+                "",
+                "",
+            )
         customer_id = order.user.telegram_id
         item = order.items[0] if order.items else None
         product_name = item.product_name if item else "—"

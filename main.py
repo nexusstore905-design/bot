@@ -6,7 +6,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters,
 )
 
-from config.settings import BOT_TOKEN, LOG_LEVEL, SUPPLIER_CHAT_ID, API_HOST, API_PORT
+from config.settings import BOT_TOKEN, LOG_LEVEL, SUPPLIER_CHAT_ID
 from database.database import init_db
 from database.database import AsyncSessionLocal
 from database.repositories.product_repo import ProductRepository
@@ -30,6 +30,7 @@ from bot.handlers.admin import (
     get_admin_conversations,
 )
 from bot.handlers.supplier import get_supplier_handlers
+from bot.auto_cancel import run_auto_cancel_worker
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -48,8 +49,9 @@ async def main():
     logger.info(
         "Supplier routing: %s destination configured%s",
         "global" if SUPPLIER_CHAT_ID else "no global",
-        "; it takes priority over category destinations" if SUPPLIER_CHAT_ID else "; category destinations are used when set",
+        "; category destinations override it" if SUPPLIER_CHAT_ID else "; category destinations are used when set",
     )
+    logger.info("Pending orders will be auto-cancelled after 10 minutes; checking every 60 seconds.")
 
     # 2. Build bot app with Rate Limiting (Outbound DDoS protection)
     from telegram.ext import AIORateLimiter
@@ -114,6 +116,10 @@ async def main():
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
         logger.info("✅ Telegram Bot is running and listening for messages.")
+        auto_cancel_task = asyncio.create_task(
+            run_auto_cancel_worker(app.bot),
+            name="pending-order-auto-cancel",
+        )
         
         # Keep running continuously in background task
         stop_event = asyncio.Event()
@@ -122,6 +128,11 @@ async def main():
         except (KeyboardInterrupt, SystemExit):
             pass
         finally:
+            auto_cancel_task.cancel()
+            try:
+                await auto_cancel_task
+            except asyncio.CancelledError:
+                pass
             await app.updater.stop()
             await app.stop()
             logger.info("Telegram Bot stopped.")

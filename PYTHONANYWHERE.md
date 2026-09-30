@@ -2,7 +2,7 @@
 
 Hosting this system on PythonAnywhere requires running **two things**:
 1. The **Telegram Bot** (runs constantly in the background).
-2. The **FastAPI REST API** (runs as a Web App to listen for internet traffic).
+2. The **Flask REST API** (runs as a Web App to listen for internet traffic).
 
 *Note: To run a background bot 24/7 on PythonAnywhere, you need a paid account (Hacker tier or above) because free accounts do not support "Always-on Tasks".*
 
@@ -24,7 +24,7 @@ Hosting this system on PythonAnywhere requires running **two things**:
    mkvirtualenv --python=/usr/bin/python3.10 nexus_venv
    pip install -r requirements.txt
    ```
-3. Make sure your `.env` file is configured with your `BOT_TOKEN`, `ADMIN_IDS`, and `SUPPLIER_CHAT_ID`. `API_KEY` is optional when using per-store keys; if you enable the master key, set a long random value. Set `API_CORS_ORIGINS` only when browser clients need access from specific origins.
+3. Make sure your `.env` file is configured with your `BOT_TOKEN`, `ADMIN_IDS`, and `SUPPLIER_CHAT_ID`. `API_KEY` is optional when using per-store keys; if you enable the master key, set a long random value. Set `API_CORS_ORIGINS` to exact browser origins only if a browser client needs cross-origin access.
 
 On the first database upgrade that adds API-store order scoping, the app creates `nexus_bot.db.pre-api-store-scope.bak` beside the SQLite database before applying the additive schema change.
 
@@ -40,7 +40,7 @@ Because the bot needs to continuously "listen" to Telegram, it runs in the backg
    /home/YOUR_USERNAME/.virtualenvs/nexus_venv/bin/python /home/YOUR_USERNAME/nexus_bot/main.py
    ```
    *(Replace `YOUR_USERNAME` with your actual PythonAnywhere username)*
-4. Click **Create**. The state will change to `Starting` and then `Running`. Your Telegram bot is now online!
+4. Click **Create**. The state will change to `Starting` and then `Running`. Your Telegram bot is now online. It also checks for pending orders to auto-cancel every 60 seconds.
 
 ---
 
@@ -48,7 +48,7 @@ Because the bot needs to continuously "listen" to Telegram, it runs in the backg
 If you want to use the REST API (`/orders/`) from the internet, you must set it up in the **Web** tab.
 
 1. Go to the **Web** tab and click **Add a new web app**.
-2. Click **Next**, then select **Manual Configuration** (do NOT choose FastAPI/Django).
+2. Click **Next**, then select **Manual Configuration**.
 3. Select **Python 3.10**.
 4. Once the app is created, scroll down to the **Virtualenv** section.
 5. Enter the path to your virtual environment:
@@ -74,17 +74,14 @@ if project_home not in sys.path:
 from dotenv import load_dotenv
 load_dotenv(os.path.join(project_home, '.env'))
 
-# Import the FastAPI app
-from api.app import app
-
-# Wrap the ASGI app (FastAPI) in a WSGI adapter so PythonAnywhere can run it
-from a2wsgi import ASGIMiddleware
-application = ASGIMiddleware(app)
+# Import the native Flask WSGI app
+from api.flask_app import app
+application = app
 ```
 *(Make sure to change `YOUR_USERNAME`!)*
 
 8. Save the file.
-9. Install project requirements (this includes the `a2wsgi` adapter used above):
+9. Install project requirements if you have not already done so:
    ```bash
    workon nexus_venv
    pip install -r /home/YOUR_USERNAME/nexus_bot/requirements.txt

@@ -235,10 +235,17 @@ async def cb_set_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.callback_query.message.reply_text("Order not found.")
             return
         customer_id = order.user.telegram_id
-        await repo.update_status(
+        updated = await repo.update_status(
             order, new_status,
             changed_by=f"admin:{update.effective_user.full_name}",
         )
+        if not updated:
+            current_status = order.status.value if order.status else "changed"
+            await update.callback_query.message.reply_text(
+                f"⚠️  Order <b>{html.escape(order_id)}</b> was already changed to <b>{html.escape(current_status)}</b>.",
+                parse_mode="HTML",
+            )
+            return
 
     await update.callback_query.message.reply_text(
         f"✅  Order <b>{order_id}</b> → <b>{new_status_str.upper()}</b>",
@@ -371,7 +378,7 @@ async def cb_set_supplier_start(update: Update, context: ContextTypes.DEFAULT_TY
         return ConversationHandler.END
 
     lines = ["📡  <b>Set Supplier Group per Category</b>\n\n"
-             "<b>Routing priority:</b> If <code>SUPPLIER_CHAT_ID</code> is set in this app's .env, it receives orders for every category. Category IDs are used only when the global ID is blank.\n\n"
+             "<b>Routing:</b> A saved supplier group receives orders for its category. Other categories use the global <code>SUPPLIER_CHAT_ID</code> fallback.\n\n"
              "Reply with:\n<code>CATEGORY | CHAT_ID</code>\n\n"
              "Examples:\n"
              "  <code>PUBG UC | -1001234567890</code>\n"
@@ -455,17 +462,12 @@ async def admin_set_supplier_value(update: Update, context: ContextTypes.DEFAULT
         logger.warning("Supplier test message to %s failed (%s)", target_chat, type(e).__name__)
 
     if test_ok:
-        category_note = (
-            f"📝  Category ID saved: <code>{supplier_chat_id}</code> (used when the global ID is blank)\n"
-            if route_source == "global" else ""
-        )
         await update.message.reply_text(
             f"━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"  ✅  <b>SUPPLIER GROUP LINKED</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📂  Category: <b>{html.escape(matched_cat)}</b>\n"
             f"📡  Active Supplier Chat ID: <code>{target_chat}</code> (<b>{route_source}</b>)\n"
-            f"{category_note}"
             f"📦  Products Updated: <b>{count}</b>\n\n"
             f"🎉 <b>Test message sent to the active order destination.</b>",
             parse_mode="HTML", reply_markup=admin_products_kb()
@@ -570,7 +572,7 @@ async def cb_remove_product_confirm(update: Update, context: ContextTypes.DEFAUL
 
 @_admin_guard
 async def cb_admin_api_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from config.settings import API_KEY, API_HOST, API_PORT
+    from config.settings import API_KEY
     await update.callback_query.answer()
     key_status = (
         "Configured (hidden in this panel)"
@@ -583,14 +585,11 @@ async def cb_admin_api_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"└──────────────────────────┘\n\n"
         f"Use the REST API to manage orders from\n"
         f"external platforms or web panels.\n\n"
-        f"🌐  <b>Bind address:</b> <code>{html.escape(API_HOST)}</code>\n"
-        f"🔌  <b>Port:</b> <code>{API_PORT}</code>\n"
+        f"🌐  <b>API:</b> Flask WSGI service\n"
+        f"📍  <b>Hosting:</b> PythonAnywhere Web tab\n"
         f"🔐  <b>API Key:</b>\n"
         f"{key_status}\n\n"
         f"<i>Pass this key in the <code>X-API-Key</code> header.</i>\n\n"
-        f"The API listener runs separately from the Telegram bot.\n"
-        f"Start it from the <code>nexus_bot</code> folder with <code>python run_api.py</code>.\n"
-        f"Use your public domain/IP for client requests; <code>0.0.0.0</code> is only a bind address.\n\n"
         f"<b>Endpoints:</b>\n"
         f"<code>POST /orders/</code> - Create order\n"
         f"<code>GET /orders/{{id}}</code> - Check status",

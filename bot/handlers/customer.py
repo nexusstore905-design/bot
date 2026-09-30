@@ -308,7 +308,7 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _forward_to_suppliers(context, order_id: str, cart_items: list, player_id: str):
     """
     Route order items to the configured supplier group.
-    The global SUPPLIER_CHAT_ID takes priority; per-category IDs are a fallback.
+    A category supplier takes priority; SUPPLIER_CHAT_ID is the fallback.
     Groups items by category and sends one message per supplier group.
     """
     # Group cart items by category
