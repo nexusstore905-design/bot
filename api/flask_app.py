@@ -181,6 +181,28 @@ def create_order():
                     run_async(_save_msg())
         except Exception as e:
             logger.error(f"Failed to forward API order to supplier: {e}")
+            from config.settings import ADMIN_IDS
+            for admin_id in ADMIN_IDS:
+                try:
+                    admin_alert = json.dumps({
+                        "chat_id": admin_id,
+                        "text": (
+                            f"⚠️ <b>API ORDER DELIVERY FAILED</b>\n\n"
+                            f"Order: <b>{safe_order_id}</b> (Category: {safe_cat})\n"
+                            f"Target Chat: <code>{target_chat}</code>\n\n"
+                            f"<b>Telegram Error:</b> <code>{html.escape(str(e))}</code>\n\n"
+                            f"👉 <i>Make sure the bot is an Administrator in that group!</i>"
+                        ),
+                        "parse_mode": "HTML"
+                    }).encode("utf-8")
+                    a_req = urllib.request.Request(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                        data=admin_alert,
+                        headers={"Content-Type": "application/json"}
+                    )
+                    urllib.request.urlopen(a_req, timeout=3)
+                except Exception:
+                    pass
 
     return jsonify(result), 200
 

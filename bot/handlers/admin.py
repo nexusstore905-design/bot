@@ -392,40 +392,86 @@ async def admin_set_supplier_value(update: Update, context: ContextTypes.DEFAULT
     text = update.message.text.strip()
     if "|" not in text:
         await update.message.reply_text(
-            "❌  Wrong format. Use:\n<code>CATEGORY | CHAT_ID</code>\n\nTry again or /cancel",
+            "❌  Wrong format. Use:\n<code>CATEGORY | CHAT_ID</code>\n\nExample:\n<code>PUBG UC | -1001234567890</code>\n\nTry again or /cancel",
             parse_mode="HTML"
         )
         return ADMIN_SET_SUPPLIER
 
     parts = text.split("|", 1)
-    category = parts[0].strip()
-    try:
-        chat_id = int(parts[1].strip())
-    except ValueError:
-        await update.message.reply_text("❌  Chat ID must be a number. Try again or /cancel")
-        return ADMIN_SET_SUPPLIER
+    category_input = parts[0].strip()
+    raw_chat_id = parts[1].strip()
 
-    supplier_chat_id = None if chat_id == 0 else chat_id
+    supplier_chat_id = None
+    if raw_chat_id != "0" and raw_chat_id.lower() != "default":
+        # Normalize chat ID
+        clean_id = raw_chat_id.replace(" ", "")
+        digits = clean_id.lstrip("-")
+        if not digits.isdigit():
+            await update.message.reply_text("❌  Chat ID must be a valid number (e.g. -1001234567890). Try again or /cancel")
+            return ADMIN_SET_SUPPLIER
+
+        # Telegram supergroups start with -100
+        if not digits.startswith("100") and len(digits) >= 8:
+            digits = "100" + digits
+        supplier_chat_id = -int(digits)
 
     async with AsyncSessionLocal() as session:
-        count = await ProductRepository(session).set_category_supplier(category, supplier_chat_id)
+        count, matched_cat = await ProductRepository(session).set_category_supplier(category_input, supplier_chat_id)
 
     if count == 0:
         await update.message.reply_text(
-            f"❌  Category <b>{category}</b> not found. Check the spelling.",
+            f"❌  Category <b>{html.escape(category_input)}</b> not found in your products. Check /admin → Products.",
             parse_mode="HTML"
         )
         return ADMIN_SET_SUPPLIER
 
-    if supplier_chat_id:
+    if not supplier_chat_id:
         await update.message.reply_text(
-            f"✅  Category <b>{category}</b> → supplier set to <code>{supplier_chat_id}</code>\n"
-            f"   ({count} product(s) updated)",
+            f"✅  Category <b>{html.escape(matched_cat)}</b> → supplier reset to <b>global default</b>.",
+            parse_mode="HTML", reply_markup=admin_products_kb()
+        )
+        return ConversationHandler.END
+
+    # Live verification test
+    test_ok = False
+    test_err = ""
+    try:
+        await context.bot.send_message(
+            chat_id=supplier_chat_id,
+            text=(
+                f"🤖  <b>SUPPLIER GROUP CONNECTED</b>\n\n"
+                f"✅ This group is now successfully linked to receive orders for:\n"
+                f"📂 Category: <b>{html.escape(matched_cat)}</b>"
+            ),
+            parse_mode="HTML"
+        )
+        test_ok = True
+    except Exception as e:
+        test_err = str(e)
+        logger.warning(f"Test message to {supplier_chat_id} failed: {e}")
+
+    if test_ok:
+        await update.message.reply_text(
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"  ✅  <b>SUPPLIER GROUP LINKED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📂  Category: <b>{html.escape(matched_cat)}</b>\n"
+            f"📡  Supplier Chat ID: <code>{supplier_chat_id}</code>\n"
+            f"📦  Products Updated: <b>{count}</b>\n\n"
+            f"🎉 <b>Test message sent successfully!</b> The group is fully ready to receive orders.",
             parse_mode="HTML", reply_markup=admin_products_kb()
         )
     else:
         await update.message.reply_text(
-            f"✅  Category <b>{category}</b> → supplier reset to <b>default</b>",
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"  ⚠️  <b>SAVED BUT NOT REACHABLE</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📂  Category: <b>{html.escape(matched_cat)}</b>\n"
+            f"📡  Chat ID: <code>{supplier_chat_id}</code>\n\n"
+            f"❌  <b>Telegram Error:</b> <code>{html.escape(test_err)}</code>\n\n"
+            f"<b>👉 IMPORTANT:</b>\n"
+            f"1. Make sure your bot is added to that group!\n"
+            f"2. Promote the bot to <b>Administrator</b> in that group so it has permission to send messages.",
             parse_mode="HTML", reply_markup=admin_products_kb()
         )
     return ConversationHandler.END

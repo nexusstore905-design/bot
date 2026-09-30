@@ -36,10 +36,21 @@ class ProductRepository:
         return list(result.scalars().all())
 
     async def get_supplier_for_category(self, category: str) -> int | None:
-        """Return the supplier_chat_id for this category (from any active product in it)."""
+        """Return the supplier_chat_id for this category (case-insensitive & flexible)."""
+        cat_clean = category.strip().lower()
         result = await self.session.execute(
             select(Product.supplier_chat_id)
-            .where(Product.category == category, Product.supplier_chat_id.isnot(None))
+            .where(func.lower(Product.category) == cat_clean, Product.supplier_chat_id.isnot(None))
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+        if row:
+            return int(row)
+
+        # Fallback to substring match (e.g. 'PUBG' matches 'PUBG UC')
+        result = await self.session.execute(
+            select(Product.supplier_chat_id)
+            .where(func.lower(Product.category).contains(cat_clean), Product.supplier_chat_id.isnot(None))
             .limit(1)
         )
         row = result.scalar_one_or_none()
@@ -63,16 +74,29 @@ class ProductRepository:
         await self.session.commit()
         return True
 
-    async def set_category_supplier(self, category: str, supplier_chat_id: int | None) -> int:
-        """Set supplier_chat_id for ALL products in a category. Returns how many updated."""
+    async def set_category_supplier(self, category: str, supplier_chat_id: int | None) -> tuple[int, str]:
+        """Set supplier_chat_id for ALL products matching category (case-insensitive). Returns (count, matched_cat)."""
+        cat_clean = category.strip().lower()
         result = await self.session.execute(
-            select(Product).where(Product.category == category)
+            select(Product).where(func.lower(Product.category) == cat_clean)
         )
         products = list(result.scalars().all())
+
+        if not products:
+            # Fallback substring match
+            result = await self.session.execute(
+                select(Product).where(func.lower(Product.category).contains(cat_clean))
+            )
+            products = list(result.scalars().all())
+
+        if not products:
+            return 0, category
+
+        matched_cat = products[0].category
         for p in products:
             p.supplier_chat_id = supplier_chat_id
         await self.session.commit()
-        return len(products)
+        return len(products), matched_cat
 
     async def deactivate(self, product_id: int) -> bool:
         product = await self.get_by_id(product_id)

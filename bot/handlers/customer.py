@@ -329,17 +329,23 @@ async def _forward_to_suppliers(context, order_id: str, cart_items: list, player
             logger.warning(f"No supplier configured for category '{category}' and no global supplier.")
             continue
 
+        import html
+        safe_order_id = html.escape(str(order_id))
+        safe_uid = html.escape(str(player_id))
+        safe_cat = html.escape(str(category))
+
         # Build supplier message
         supplier_text = (
             f"┌──────────────────────────┐\n"
             f"│    🆕  NEW ORDER             │\n"
             f"└──────────────────────────┘\n\n"
-            f"  🆔  Order:     <b>{order_id}</b>\n"
-            f"  🎯  PUBG UID:  <code>{player_id}</code>\n\n"
-            f"  📦  <b>Items ({category}):</b>\n"
+            f"  🆔  Order:     <b>{safe_order_id}</b>\n"
+            f"  🎯  PUBG UID:  <code>{safe_uid}</code>\n\n"
+            f"  📦  <b>Items ({safe_cat}):</b>\n"
         )
         for item in items:
-            supplier_text += f"      - {item['product_name']} (x{item['quantity']})\n"
+            safe_pname = html.escape(str(item['product_name']))
+            supplier_text += f"      - {safe_pname} (x{item['quantity']})\n"
         supplier_text += f"\nMark as <b>DONE</b> or <b>ERROR</b>:"
 
         try:
@@ -359,6 +365,23 @@ async def _forward_to_suppliers(context, order_id: str, cart_items: list, player
             sent_to.add(target_chat)
         except Exception as e:
             logger.error(f"Failed to send order to supplier {target_chat} for category '{category}': {e}")
+            # Alert the admin immediately so they know why an order didn't go through!
+            from config.settings import ADMIN_IDS
+            for admin_id in ADMIN_IDS:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text=(
+                            f"⚠️ <b>SUPPLIER DELIVERY ALERT</b>\n\n"
+                            f"Order: <b>{safe_order_id}</b> (Category: {safe_cat})\n"
+                            f"Failed to deliver to Group ID: <code>{target_chat}</code>\n\n"
+                            f"<b>Telegram Error:</b> <code>{html.escape(str(e))}</code>\n\n"
+                            f"👉 <i>Check that your bot is added as an <b>Administrator</b> in that group!</i>"
+                        ),
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
 
 
 async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
