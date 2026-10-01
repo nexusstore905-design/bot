@@ -44,7 +44,15 @@ def admin_products_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🗑  Remove",        callback_data="adm_remove_product")],
         [InlineKeyboardButton("📝  Rename product group", callback_data="adm_rename_group")],
         [InlineKeyboardButton("📋  Product list", callback_data="adm_list_products")],
+        [InlineKeyboardButton("🧹  Clean removed products", callback_data="adm_cleanup_removed")],
         [InlineKeyboardButton("◀  Back",          callback_data="admin_menu")],
+    ])
+
+
+def cleanup_removed_products_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧹  Permanently clean unused products", callback_data="adm_cleanup_removed_confirm")],
+        [InlineKeyboardButton("✖  Cancel", callback_data="adm_products")],
     ])
 
 

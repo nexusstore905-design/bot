@@ -20,6 +20,7 @@ from database.models import OrderStatus
 from bot.middlewares.auth_middleware import is_admin
 from bot.keyboards.admin_kb import (
     admin_main_kb, admin_orders_kb, admin_products_kb,
+    cleanup_removed_products_kb,
     admin_pin_kb, remove_products_kb, change_status_kb,
     api_stores_kb, store_actions_kb, user_limits_kb,
     create_code_options_kb,
@@ -310,13 +311,21 @@ async def cb_list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     async with AsyncSessionLocal() as session:
         repo = ProductRepository(session)
-        products = await repo.get_all()
+        products = await repo.get_all_active()
+        deletable_count, preserved_count = await repo.get_inactive_cleanup_counts()
 
     if not products:
-        await update.callback_query.message.reply_text("No products.", reply_markup=admin_products_kb())
+        await update.callback_query.message.reply_text(
+            "No active products.\n"
+            f"Removed products hidden: <b>{deletable_count + preserved_count}</b>.",
+            parse_mode="HTML", reply_markup=admin_products_kb()
+        )
         return
 
-    lines = ["📦 <b>Product groups and packages</b>\n──────────────"]
+    lines = [
+        "📦 <b>Active product groups and packages</b>\n──────────────",
+        f"Removed products hidden: <b>{deletable_count + preserved_count}</b>\n",
+    ]
     cat = None
     for p in products:
         if p.category != cat:
@@ -327,6 +336,48 @@ async def cb_list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{active} <code>#{p.id}</code>  {html.escape(p.name, quote=False)}")
     await update.callback_query.message.reply_text(
         "\n".join(lines), parse_mode="HTML", reply_markup=admin_products_kb()
+    )
+
+
+@_admin_guard
+async def cb_cleanup_removed_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    async with AsyncSessionLocal() as session:
+        deletable_count, preserved_count = await ProductRepository(session).get_inactive_cleanup_counts()
+
+    if not deletable_count and not preserved_count:
+        await update.callback_query.message.reply_text(
+            "✅ There are no removed products to clean.", reply_markup=admin_products_kb()
+        )
+        return
+
+    if not deletable_count:
+        await update.callback_query.message.reply_text(
+            "🧹 Nothing can be permanently deleted.\n\n"
+            f"Removed products kept for old order history: <b>{preserved_count}</b>.",
+            parse_mode="HTML", reply_markup=admin_products_kb()
+        )
+        return
+
+    await update.callback_query.message.reply_text(
+        "🧹 <b>Clean removed products?</b>\n\n"
+        f"Unused removed products to delete: <b>{deletable_count}</b>\n"
+        f"Products kept for old order history: <b>{preserved_count}</b>\n\n"
+        "Deleted products cannot be restored. Supplier settings will be copied to active packages in the same group before cleanup.",
+        parse_mode="HTML", reply_markup=cleanup_removed_products_kb(),
+    )
+
+
+@_admin_guard
+async def cb_cleanup_removed_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    async with AsyncSessionLocal() as session:
+        deleted_count, preserved_count = await ProductRepository(session).cleanup_inactive_products()
+    await update.callback_query.message.edit_text(
+        "🧹 <b>Product cleanup finished</b>\n\n"
+        f"Permanently deleted: <b>{deleted_count}</b>\n"
+        f"Kept for old order history: <b>{preserved_count}</b>",
+        parse_mode="HTML", reply_markup=admin_products_kb(),
     )
 
 

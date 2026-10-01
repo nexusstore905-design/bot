@@ -1,8 +1,8 @@
 import re
-from sqlalchemy import select, func
+from sqlalchemy import delete, exists, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import Product
+from database.models import OrderItem, Product
 
 
 def _product_name_sort_key(name: str) -> tuple[int, int, str]:
@@ -31,6 +31,67 @@ class ProductRepository:
         )
         products = list(result.scalars().all())
         return sorted(products, key=lambda p: (p.category.casefold(), *_product_name_sort_key(p.name)))
+
+    async def get_inactive_cleanup_counts(self) -> tuple[int, int]:
+        """Return (inactive products safe to delete, products referenced by old orders)."""
+        used_by_order = exists(
+            select(OrderItem.id)
+            .where(OrderItem.product_id == Product.id)
+            .correlate(Product)
+        )
+        inactive_result = await self.session.execute(
+            select(func.count()).select_from(Product).where(Product.is_active.is_(False))
+        )
+        inactive_count = inactive_result.scalar_one() or 0
+        referenced_result = await self.session.execute(
+            select(func.count()).select_from(Product).where(
+                Product.is_active.is_(False),
+                used_by_order,
+            )
+        )
+        referenced_count = referenced_result.scalar_one() or 0
+        return inactive_count - referenced_count, referenced_count
+
+    async def cleanup_inactive_products(self) -> tuple[int, int]:
+        """Permanently delete removed products only when no order history uses them."""
+        removed_result = await self.session.execute(
+            select(Product).where(
+                Product.is_active.is_(False),
+                Product.supplier_chat_id.isnot(None),
+            )
+        )
+        removed_with_supplier = list(removed_result.scalars().all())
+        active_result = await self.session.execute(
+            select(Product).where(Product.is_active.is_(True))
+        )
+        active_products = list(active_result.scalars().all())
+        active_by_category: dict[str, list[Product]] = {}
+        for product in active_products:
+            active_by_category.setdefault(product.category.casefold(), []).append(product)
+
+        routes_migrated = False
+        for removed in removed_with_supplier:
+            for active in active_by_category.get(removed.category.casefold(), []):
+                if active.supplier_chat_id is None:
+                    active.supplier_chat_id = removed.supplier_chat_id
+                    routes_migrated = True
+
+        used_by_order = exists(
+            select(OrderItem.id)
+            .where(OrderItem.product_id == Product.id)
+            .correlate(Product)
+        )
+        result = await self.session.execute(
+            delete(Product).where(
+                Product.is_active.is_(False),
+                ~used_by_order,
+            )
+        )
+        deleted_count = result.rowcount or 0
+        if deleted_count or routes_migrated:
+            await self.session.commit()
+        _, preserved_count = await self.get_inactive_cleanup_counts()
+        return deleted_count, preserved_count
 
     async def get_categories(self) -> list[str]:
         result = await self.session.execute(
