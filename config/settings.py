@@ -36,3 +36,8 @@ LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 API_KEY: str = os.getenv("API_KEY", "").strip()
 if API_KEY == "change-this-to-a-secret-key":
     API_KEY = ""
+API_CORS_ORIGINS: set[str] = {
+    origin.strip()
+    for origin in os.getenv("API_CORS_ORIGINS", "").split(",")
+    if origin.strip()
+}

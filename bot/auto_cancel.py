@@ -50,12 +50,17 @@ async def cancel_expired_pending_orders(bot) -> int:
 
 
 async def run_auto_cancel_worker(bot) -> None:
+    logger.info(
+        "Auto-cancel worker started: pending timeout=%s minutes, check interval=%s seconds",
+        PENDING_ORDER_TIMEOUT.total_seconds() / 60,
+        AUTO_CANCEL_INTERVAL_SECONDS,
+    )
     while True:
         try:
             await cancel_expired_pending_orders(bot)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            logger.error("Pending-order auto-cancel check failed (%s)", type(exc).__name__)
+        except Exception:
+            logger.exception("Pending-order auto-cancel check failed")
 
         await asyncio.sleep(AUTO_CANCEL_INTERVAL_SECONDS)
