@@ -14,8 +14,9 @@ from database.repositories.user_repo import UserRepository
 from database.models import AuthStatus
 from bot.states.states import ENTER_PIN
 from bot.keyboards.customer_kb import main_menu_kb, back_to_menu_kb
-from bot.middlewares.auth_middleware import is_admin
+from bot.middlewares.auth_middleware import is_admin, require_callback_auth
 from config.settings import STORE_NAME
+from utils.ui import panel
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +26,12 @@ BRAND = f"✨ <b>{html.escape(STORE_NAME.strip().upper(), quote=False)}</b> ✨"
 def _welcome_text(name: str, returning: bool = False) -> str:
     safe_name = html.escape(name, quote=False)
     greeting = "Welcome back" if returning else "Welcome"
-    return (
-        f"{BRAND}\n"
+    return panel(
+        STORE_NAME.strip().upper(),
         "<i>Your order and tracking center</i>\n\n"
         f"👋 {greeting}, <b>{safe_name}</b>!\n\n"
-        "Choose an option below to get started."
+        "Choose an option below to get started.",
+        icon="✨",
     )
 
 
@@ -160,12 +162,9 @@ async def _show_main_menu_chat(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
 
 
 async def cb_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from bot.middlewares.auth_middleware import require_auth
-    if not await require_auth(update, context):
-        await update.callback_query.answer("🔐 Please authenticate first.", show_alert=True)
+    if not await require_callback_auth(update, context):
         return
-    await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         _welcome_text(update.effective_user.first_name, returning=True),
         reply_markup=main_menu_kb(),
         parse_mode="HTML",
@@ -181,7 +180,7 @@ async def cb_logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if db_user:
             await repo.logout(db_user)
     context.user_data.clear()
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "🔓 <b>Signed out</b>\n\n"
         "Send /start whenever you want to sign in again.",
         parse_mode="HTML",
@@ -189,12 +188,9 @@ async def cb_logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cb_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from bot.middlewares.auth_middleware import require_auth
-    if not await require_auth(update, context):
-        await update.callback_query.answer("🔐 Please authenticate first.", show_alert=True)
+    if not await require_callback_auth(update, context):
         return
-    await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "💬 <b>Help and order guide</b>\n\n"
         "<b>Place an order</b>\n"
         "1. Choose a category and package.\n"
@@ -214,12 +210,9 @@ async def cb_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cb_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from bot.middlewares.auth_middleware import require_auth
-    if not await require_auth(update, context):
-        await update.callback_query.answer("🔐 Please authenticate first.", show_alert=True)
+    if not await require_callback_auth(update, context):
         return
-    await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         f"🏪 <b>About {html.escape(STORE_NAME, quote=False)}</b>\n\n"
         "Use this bot to submit orders and follow their progress.\n\n"
         "📦 Choose a product and enter the correct player ID.\n"

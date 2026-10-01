@@ -31,6 +31,14 @@ class OrderStatus(str, enum.Enum):
     cancelled = "cancelled"
 
 
+class SupplierFulfillmentStatus(str, enum.Enum):
+    queued = "queued"
+    sending = "sending"
+    pending = "pending"
+    completed = "completed"
+    failed = "failed"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -118,6 +126,10 @@ class Order(Base):
     history: Mapped[List["OrderStatusHistory"]] = relationship(
         "OrderStatusHistory", back_populates="order", order_by="OrderStatusHistory.created_at"
     )
+    fulfillments: Mapped[List["SupplierFulfillment"]] = relationship(
+        "SupplierFulfillment", back_populates="order", cascade="all, delete-orphan",
+        order_by="SupplierFulfillment.id", lazy="selectin",
+    )
 
 
 class OrderItem(Base):
@@ -148,6 +160,27 @@ class OrderStatusHistory(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     order: Mapped["Order"] = relationship("Order", back_populates="history")
+
+
+class SupplierFulfillment(Base):
+    """One supplier's durable part of an order, with its own response state."""
+    __tablename__ = "supplier_fulfillments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(Integer, ForeignKey("orders.id"), nullable=False, index=True)
+    supplier_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    items_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[SupplierFulfillmentStatus] = mapped_column(
+        Enum(SupplierFulfillmentStatus), default=SupplierFulfillmentStatus.queued, nullable=False
+    )
+    changed_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    supplier_msg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    failure_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    order: Mapped["Order"] = relationship("Order", back_populates="fulfillments")
 
 
 class ApiStore(Base):

@@ -21,7 +21,8 @@ from database.repositories.api_store_repo import ApiStoreRepository, UserOrderLi
 from database.models import OrderStatus
 from bot.middlewares.auth_middleware import is_admin
 from bot.keyboards.admin_kb import (
-    admin_main_kb, admin_orders_kb, admin_products_kb,
+    admin_main_kb, admin_advanced_kb, admin_orders_kb, admin_products_kb,
+    admin_product_advanced_kb,
     cleanup_removed_products_kb, admin_customers_kb,
     admin_customer_detail_kb, admin_customer_orders_kb,
     customer_date_result_kb, reset_all_products_kb,
@@ -42,6 +43,7 @@ from bot.states.states import (
     ADMIN_SET_USER_LIMIT_ID, ADMIN_SET_USER_LIMIT_VALUE,
 )
 from utils.supplier_routing import resolve_supplier_chat
+from utils.ui import panel
 
 
 logger = logging.getLogger(__name__)
@@ -68,9 +70,7 @@ def _admin_guard(func):
 @_admin_guard
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "  👑  <b>ADMIN PANEL</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━",
+        panel("Admin panel", "Manage orders, products, customers, and access.", icon="👑"),
         reply_markup=admin_main_kb(),
         parse_mode="HTML",
     )
@@ -79,9 +79,29 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @_admin_guard
 async def cb_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
-        "👑  <b>ADMIN PANEL</b>",
+    await update.callback_query.message.edit_text(
+        panel("Admin panel", "Choose an area to manage.", icon="👑"),
         reply_markup=admin_main_kb(),
+        parse_mode="HTML",
+    )
+
+
+@_admin_guard
+async def cb_admin_advanced(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.message.edit_text(
+        panel("Advanced settings", "API stores, order limits, and service availability.", icon="⚙️"),
+        reply_markup=admin_advanced_kb(),
+        parse_mode="HTML",
+    )
+
+
+@_admin_guard
+async def cb_admin_product_advanced(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.message.edit_text(
+        panel("Advanced product tools", "These actions affect removed products or the full catalog.", icon="🧰"),
+        reply_markup=admin_product_advanced_kb(),
         parse_mode="HTML",
     )
 
@@ -96,7 +116,7 @@ async def cb_toggle_power(update: Update, context: ContextTypes.DEFAULT_TYPE):
         open(flag, "w").close()
         await update.callback_query.answer("🔴 BOT TURNED OFF (Maintenance)!", show_alert=True)
         
-    await update.callback_query.message.edit_reply_markup(reply_markup=admin_main_kb())
+    await update.callback_query.message.edit_reply_markup(reply_markup=admin_advanced_kb())
 
 
 # ─── Stats ───────────────────────────────────────────────────────────
@@ -111,7 +131,7 @@ async def cb_admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users = await user_repo.get_all()
 
     total = sum(counts.values())
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"  📊  <b>STATISTICS</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -135,7 +155,7 @@ async def cb_admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @_admin_guard
 async def cb_admin_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "📦  <b>Orders</b>", reply_markup=admin_orders_kb(), parse_mode="HTML"
     )
 
@@ -157,7 +177,7 @@ async def cb_orders_by_status(update: Update, context: ContextTypes.DEFAULT_TYPE
         orders = await repo.get_by_status(status)
 
     if not orders:
-        await update.callback_query.message.reply_text(
+        await update.callback_query.message.edit_text(
             f"No {status.value} orders.", reply_markup=admin_orders_kb()
         )
         return
@@ -173,7 +193,7 @@ async def cb_orders_by_status(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "\n".join(lines), parse_mode="HTML", reply_markup=admin_orders_kb()
     )
 
@@ -181,7 +201,7 @@ async def cb_orders_by_status(update: Update, context: ContextTypes.DEFAULT_TYPE
 @_admin_guard
 async def cb_search_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "🔍  Enter the <b>Order ID</b> (e.g. NX123456):\n\n/cancel to abort",
         parse_mode="HTML",
     )
@@ -233,14 +253,14 @@ async def cb_set_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         new_status = OrderStatus(new_status_str)
     except ValueError:
-        await update.callback_query.message.reply_text("Invalid status.")
+        await update.callback_query.message.edit_text("Invalid status.")
         return
 
     async with AsyncSessionLocal() as session:
         repo = OrderRepository(session)
         order = await repo.get_by_order_id(order_id)
         if not order:
-            await update.callback_query.message.reply_text("Order not found.")
+            await update.callback_query.message.edit_text("Order not found.")
             return
         customer_id = order.user.telegram_id
         updated = await repo.update_status(
@@ -249,13 +269,13 @@ async def cb_set_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if not updated:
             current_status = order.status.value if order.status else "changed"
-            await update.callback_query.message.reply_text(
+            await update.callback_query.message.edit_text(
                 f"⚠️  Order <b>{html.escape(order_id)}</b> was already changed to <b>{html.escape(current_status)}</b>.",
                 parse_mode="HTML",
             )
             return
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         f"✅  Order <b>{order_id}</b> → <b>{new_status_str.upper()}</b>",
         parse_mode="HTML",
     )
@@ -357,10 +377,10 @@ async def cb_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         customers, total, keyboard = await _get_customer_page(session, 0)
 
     if not total:
-        await update.callback_query.message.reply_text("No users yet.", reply_markup=admin_main_kb())
+        await update.callback_query.message.edit_text("No users yet.", reply_markup=admin_main_kb())
         return
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         _customer_page_text(customers, 0, total), parse_mode="HTML", reply_markup=keyboard
     )
 
@@ -387,7 +407,7 @@ async def cb_customer_details(update: Update, context: ContextTypes.DEFAULT_TYPE
     async with AsyncSessionLocal() as session:
         user = await UserRepository(session).get_by_telegram_id(telegram_id)
         if user is None:
-            await update.callback_query.message.reply_text("Customer not found.")
+            await update.callback_query.message.edit_text("Customer not found.")
             return
         summary = await OrderRepository(session).summarize_user_orders(user.id)
         latest_orders = await OrderRepository(session).get_by_user(user.id, limit=1)
@@ -408,7 +428,7 @@ async def cb_customer_details(update: Update, context: ContextTypes.DEFAULT_TYPE
         "<b>All-time orders</b>\n"
         + "\n".join(_customer_summary_lines(summary))
     )
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         text, parse_mode="HTML", reply_markup=admin_customer_detail_kb(telegram_id)
     )
 
@@ -422,7 +442,7 @@ async def cb_customer_orders(update: Update, context: ContextTypes.DEFAULT_TYPE)
     async with AsyncSessionLocal() as session:
         user = await UserRepository(session).get_by_telegram_id(telegram_id)
         if user is None:
-            await update.callback_query.message.reply_text("Customer not found.")
+            await update.callback_query.message.edit_text("Customer not found.")
             return
         orders_repo = OrderRepository(session)
         total = await orders_repo.count_by_user(user.id)
@@ -431,7 +451,7 @@ async def cb_customer_orders(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
 
     if not orders:
-        await update.callback_query.message.reply_text(
+        await update.callback_query.message.edit_text(
             "This customer has no orders yet.",
             reply_markup=admin_customer_detail_kb(telegram_id),
         )
@@ -450,7 +470,7 @@ async def cb_customer_orders(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"Product: {items}\n"
             f"Player ID: <code>{html.escape(order.player_id, quote=False)}</code>"
         )
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "\n\n".join(lines), parse_mode="HTML",
         reply_markup=admin_customer_orders_kb(
             telegram_id, page, offset + len(orders) < total
@@ -465,10 +485,10 @@ async def cb_customer_dates_start(update: Update, context: ContextTypes.DEFAULT_
     async with AsyncSessionLocal() as session:
         user = await UserRepository(session).get_by_telegram_id(telegram_id)
     if user is None:
-        await update.callback_query.message.reply_text("Customer not found.")
+        await update.callback_query.message.edit_text("Customer not found.")
         return ConversationHandler.END
     context.user_data["admin_customer_date_telegram_id"] = telegram_id
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "📅 Enter a date to count all orders up to that day, or enter a date range.\n\n"
         "Examples:\n"
         "• <code>2026-10-01</code> (from the beginning through this date)\n"
@@ -522,8 +542,10 @@ async def admin_customer_date_range(update: Update, context: ContextTypes.DEFAUL
 @_admin_guard
 async def cb_admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
-        "🛍  <b>Products</b>", reply_markup=admin_products_kb(), parse_mode="HTML"
+    await update.callback_query.message.edit_text(
+        panel("Products", "Manage packages and supplier routing.", icon="🛍"),
+        reply_markup=admin_products_kb(),
+        parse_mode="HTML",
     )
 
 
@@ -536,7 +558,7 @@ async def cb_list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         deletable_count, preserved_count = await repo.get_inactive_cleanup_counts()
 
     if not products:
-        await update.callback_query.message.reply_text(
+        await update.callback_query.message.edit_text(
             "No active products.\n"
             f"Removed products hidden: <b>{deletable_count + preserved_count}</b>.",
             parse_mode="HTML", reply_markup=admin_products_kb()
@@ -555,7 +577,7 @@ async def cb_list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"\n📂 <b>{html.escape(cat, quote=False)}</b>  · Supplier: {sup}")
         active = "✅" if p.is_active else "❌"
         lines.append(f"{active} <code>#{p.id}</code>  {html.escape(p.name, quote=False)}")
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "\n".join(lines), parse_mode="HTML", reply_markup=admin_products_kb()
     )
 
@@ -567,20 +589,20 @@ async def cb_cleanup_removed_start(update: Update, context: ContextTypes.DEFAULT
         deletable_count, preserved_count = await ProductRepository(session).get_inactive_cleanup_counts()
 
     if not deletable_count and not preserved_count:
-        await update.callback_query.message.reply_text(
-            "✅ There are no removed products to clean.", reply_markup=admin_products_kb()
+        await update.callback_query.message.edit_text(
+            "✅ There are no removed products to clean.", reply_markup=admin_product_advanced_kb()
         )
         return
 
     if not deletable_count:
-        await update.callback_query.message.reply_text(
+        await update.callback_query.message.edit_text(
             "🧹 Nothing can be permanently deleted.\n\n"
             f"Removed products kept for old order history: <b>{preserved_count}</b>.",
-            parse_mode="HTML", reply_markup=admin_products_kb()
+            parse_mode="HTML", reply_markup=admin_product_advanced_kb()
         )
         return
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "🧹 <b>Clean removed products?</b>\n\n"
         f"Unused removed products to delete: <b>{deletable_count}</b>\n"
         f"Products kept for old order history: <b>{preserved_count}</b>\n\n"
@@ -598,7 +620,7 @@ async def cb_cleanup_removed_confirm(update: Update, context: ContextTypes.DEFAU
         "🧹 <b>Product cleanup finished</b>\n\n"
         f"Permanently deleted: <b>{deleted_count}</b>\n"
         f"Kept for old order history: <b>{preserved_count}</b>",
-        parse_mode="HTML", reply_markup=admin_products_kb(),
+        parse_mode="HTML", reply_markup=admin_product_advanced_kb(),
     )
 
 
@@ -608,7 +630,7 @@ async def cb_reset_all_products_start(update: Update, context: ContextTypes.DEFA
     async with AsyncSessionLocal() as session:
         product_count, linked_items, affected_orders = await ProductRepository(session).get_full_reset_counts()
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "🧨 <b>Delete every product and reset IDs?</b>\n\n"
         f"Product records to delete: <b>{product_count}</b>\n"
         f"Past orders that use these products: <b>{affected_orders}</b>\n"
@@ -631,7 +653,7 @@ async def cb_reset_all_products_confirm(update: Update, context: ContextTypes.DE
         f"Products deleted: <b>{deleted_count}</b>\n"
         f"Old order product IDs cleared: <b>{detached_items}</b>\n\n"
         "Old order history and product names are kept. Your next new product will use ID #1.",
-        parse_mode="HTML", reply_markup=admin_products_kb(),
+        parse_mode="HTML", reply_markup=admin_product_advanced_kb(),
     )
 
 
@@ -641,7 +663,7 @@ async def cb_add_product_start(update: Update, context: ContextTypes.DEFAULT_TYP
     async with AsyncSessionLocal() as session:
         groups = await ProductRepository(session).get_categories()
     group_hint = "\n\nExisting groups: " + ", ".join(groups) if groups else ""
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "📂 <b>Enter the product group name</b>\n\n"
         "Customers will tap this name first, then choose one of its packages.\n"
         "For example, enter <code>PUBG UC Top Up</code>. "
@@ -731,10 +753,10 @@ async def cb_rename_group_start(update: Update, context: ContextTypes.DEFAULT_TY
     async with AsyncSessionLocal() as session:
         groups = await ProductRepository(session).get_categories()
     if not groups:
-        await update.callback_query.message.reply_text("No product groups to rename.")
+        await update.callback_query.message.edit_text("No product groups to rename.")
         return ConversationHandler.END
     names = "\n".join(f"• {html.escape(group, quote=False)}" for group in groups)
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "📝 <b>Rename a product group</b>\n\n"
         f"Current groups:\n{names}\n\n"
         "Send the current group name exactly as shown:",
@@ -797,7 +819,7 @@ async def cb_set_supplier_start(update: Update, context: ContextTypes.DEFAULT_TY
     async with AsyncSessionLocal() as session:
         categories = await ProductRepository(session).get_categories()
     if not categories:
-        await update.callback_query.message.reply_text("❌  No categories found. Add products first.")
+        await update.callback_query.message.edit_text("❌  No categories found. Add products first.")
         return ConversationHandler.END
 
     lines = ["📡  <b>Set Supplier Group per Product</b>\n\n"
@@ -816,7 +838,7 @@ async def cb_set_supplier_start(update: Update, context: ContextTypes.DEFAULT_TY
         sup_text = f"<code>{sup_id}</code>" if sup_id else "<i>default</i>"
         lines.append(f"  📂  <b>{html.escape(cat, quote=False)}</b> → {sup_text}")
     lines.append("\n/cancel to abort")
-    await update.callback_query.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await update.callback_query.message.edit_text("\n".join(lines), parse_mode="HTML")
     return ADMIN_SET_SUPPLIER
 
 
@@ -979,7 +1001,7 @@ async def cb_edit_name_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     for p in products:
         lines.append(f"  <b>#{p.id}</b>  {p.name}")
     lines.append("\n/cancel to abort")
-    await update.callback_query.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await update.callback_query.message.edit_text("\n".join(lines), parse_mode="HTML")
     return ADMIN_EDIT_NAME_SELECT
 
 async def admin_edit_name_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1025,9 +1047,9 @@ async def cb_remove_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with AsyncSessionLocal() as session:
         products = await ProductRepository(session).get_all_active()
     if not products:
-        await update.callback_query.message.reply_text("No products to remove.")
+        await update.callback_query.message.edit_text("No products to remove.")
         return
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "🗑  Tap to remove:", reply_markup=remove_products_kb(products)
     )
 
@@ -1058,7 +1080,7 @@ async def cb_admin_api_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if API_KEY else "Not configured; use per-store API keys"
     )
     
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "🔑 <b>API settings</b>\n──────────────\n"
         "Use the REST API to accept orders from connected platforms.\n\n"
         "🌐 <b>Service</b>  Flask API\n"
@@ -1079,7 +1101,7 @@ async def cb_admin_api_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @_admin_guard
 async def cb_admin_pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "🔐  <b>Access Code Management</b>\n\n"
         "Create unique codes for trusted users.\n"
         "Each code registers one user.",
@@ -1091,7 +1113,7 @@ async def cb_admin_pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @_admin_guard
 async def cb_create_code_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "➕  <b>Create Access Code</b>\n\n"
         "Send a <b>label</b> for this code (e.g. <i>John's Code</i>),\n"
         "or tap <b>⚡ Instant Code</b> to generate one immediately without a label.",
@@ -1109,7 +1131,7 @@ async def cb_create_code_instant(update: Update, context: ContextTypes.DEFAULT_T
             repo = AccessCodeRepository(session)
             code = await repo.create(label=None)
 
-        await update.callback_query.message.reply_text(
+        await update.callback_query.message.edit_text(
             f"━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"  ✅  <b>Access Code Created</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1123,7 +1145,7 @@ async def cb_create_code_instant(update: Update, context: ContextTypes.DEFAULT_T
         )
     except Exception as e:
         logger.error(f"Error creating instant access code: {e}", exc_info=True)
-        await update.callback_query.message.reply_text(
+        await update.callback_query.message.edit_text(
             f"❌  Error generating code: {html.escape(str(e))}\n\nPlease try again.",
             reply_markup=admin_pin_kb(),
         )
@@ -1170,7 +1192,7 @@ async def cb_list_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         codes = await repo.get_all()
 
     if not codes:
-        await update.callback_query.message.reply_text(
+        await update.callback_query.message.edit_text(
             "No access codes yet.\nTap ➕ Create to make one.",
             reply_markup=admin_pin_kb(),
         )
@@ -1185,7 +1207,7 @@ async def cb_list_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"   👤  Used by: {c.used_by or 'Not yet'}\n"
         )
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "\n".join(lines), parse_mode="HTML", reply_markup=admin_pin_kb()
     )
 
@@ -1197,7 +1219,7 @@ async def cb_revoke_code_start(update: Update, context: ContextTypes.DEFAULT_TYP
         codes = await AccessCodeRepository(session).get_active_unused()
 
     if not codes:
-        await update.callback_query.message.reply_text(
+        await update.callback_query.message.edit_text(
             "No active unused codes to revoke.", reply_markup=admin_pin_kb()
         )
         return
@@ -1206,7 +1228,7 @@ async def cb_revoke_code_start(update: Update, context: ContextTypes.DEFAULT_TYP
     for c in codes:
         lines.append(f"  <code>{c.code}</code>  —  {c.label or '—'}")
     lines.append("\n/cancel to abort")
-    await update.callback_query.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await update.callback_query.message.edit_text("\n".join(lines), parse_mode="HTML")
     return ADMIN_REVOKE_CODE
 
 
@@ -1223,7 +1245,7 @@ async def admin_revoke_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @_admin_guard
 async def cb_revoke_user_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "⛔  Enter <b>Telegram User ID</b> to revoke:\n\n/cancel to abort", parse_mode="HTML"
     )
     return ADMIN_REVOKE_USER
@@ -1246,7 +1268,7 @@ async def admin_revoke_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @_admin_guard
 async def cb_reset_user_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "🔄  Enter <b>Telegram User ID</b> to reset auth:\n\n/cancel to abort", parse_mode="HTML"
     )
     return ADMIN_RESET_USER
@@ -1277,7 +1299,7 @@ async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_admin_cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.message.reply_text("✖  Operation cancelled.", reply_markup=admin_main_kb())
+        await update.callback_query.message.edit_text("✖  Operation cancelled.", reply_markup=admin_main_kb())
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -1289,7 +1311,7 @@ async def cb_admin_cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYP
 @_admin_guard
 async def cb_api_stores(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         "  🏪  <b>API STORES</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1302,7 +1324,7 @@ async def cb_api_stores(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @_admin_guard
 async def cb_add_store_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "🏪  Enter a <b>name</b> for the new store:\n\n"
         "<i>(e.g. MyWebsite, PartnerShop)</i>",
         parse_mode="HTML",
@@ -1342,7 +1364,7 @@ async def cb_list_stores(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stores = await repo.get_all()
 
     if not stores:
-        await update.callback_query.message.reply_text(
+        await update.callback_query.message.edit_text(
             "📋  No API stores found.\n\nUse <b>➕ Add Store</b> to create one.",
             reply_markup=api_stores_kb(),
             parse_mode="HTML",
@@ -1360,7 +1382,7 @@ async def cb_list_stores(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )])
     rows.append([InlineKeyboardButton("◀  Back", callback_data="adm_api_stores")])
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         "  📋  <b>ALL API STORES</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1381,14 +1403,14 @@ async def cb_store_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
         store = result.scalar_one_or_none()
 
     if not store:
-        await update.callback_query.message.reply_text("❌  Store not found.")
+        await update.callback_query.message.edit_text("❌  Store not found.")
         return
 
     status = "🟢 Active" if store.is_active else "🔴 Disabled"
     limit_text = str(store.daily_limit) if store.daily_limit > 0 else "Unlimited"
     key_preview = store.api_key[:12] + "..." + store.api_key[-6:]
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"  🏪  <b>{html.escape(store.name)}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1436,7 +1458,7 @@ async def cb_store_limit_start(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.callback_query.answer()
     store_id = int(update.callback_query.data.split(":")[1])
     context.user_data["edit_store_id"] = store_id
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "📊  Enter the <b>daily order limit</b> for this store:\n\n"
         "<i>Enter 0 for unlimited.</i>",
         parse_mode="HTML",
@@ -1504,7 +1526,7 @@ async def cb_store_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @_admin_guard
 async def cb_user_limits(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         "  🚦  <b>USER ORDER LIMITS</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1519,7 +1541,7 @@ async def cb_user_limits(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @_admin_guard
 async def cb_set_user_limit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "🚦  Enter the <b>Telegram ID</b> of the user you want to limit:\n\n"
         "<i>(You can find their ID in the Users list)</i>",
         parse_mode="HTML",
@@ -1584,7 +1606,7 @@ async def cb_list_user_limits(update: Update, context: ContextTypes.DEFAULT_TYPE
         limits = await repo.get_all_limited()
 
     if not limits:
-        await update.callback_query.message.reply_text(
+        await update.callback_query.message.edit_text(
             "📋  No user limits configured.\n\n"
             "All users have unlimited orders.\n"
             "Use <b>🚦 Set User Limit</b> to add one.",
@@ -1598,7 +1620,7 @@ async def cb_list_user_limits(update: Update, context: ContextTypes.DEFAULT_TYPE
         limit_text = "🚫 BLOCKED" if l.daily_limit == 0 else f"{l.orders_today}/{l.daily_limit}"
         lines.append(f"  👤  <code>{l.telegram_id}</code>  →  <b>{limit_text}</b>")
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         "  📋  <b>USER LIMITS</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n\n"

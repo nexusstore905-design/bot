@@ -17,10 +17,10 @@ from bot.handlers.auth import (
 )
 from bot.handlers.customer import (
     get_order_conversation, cmd_my_orders,
-    cb_my_orders_btn, cb_refresh_order,
+    cb_my_orders_btn, cb_my_orders_page, cb_view_order, cb_refresh_order,
 )
 from bot.handlers.admin import (
-    cmd_admin, cb_admin_menu, cb_admin_stats,
+    cmd_admin, cb_admin_menu, cb_admin_advanced, cb_admin_product_advanced, cb_admin_stats,
     cb_admin_orders, cb_orders_by_status,
     cb_set_status, cb_admin_users, cb_admin_products,
     cb_list_products, cb_remove_product, cb_remove_product_confirm,
@@ -54,7 +54,7 @@ async def main():
         "global" if SUPPLIER_CHAT_ID else "no global",
         "; category destinations override it" if SUPPLIER_CHAT_ID else "; category destinations are used when set",
     )
-    logger.info("Pending orders will be auto-cancelled after 10 minutes; checking every 60 seconds.")
+    logger.info("Unanswered supplier work expires after 10 minutes; checking every 60 seconds.")
 
     # 2. Build bot app with Rate Limiting (Outbound DDoS protection)
     from telegram.ext import AIORateLimiter
@@ -81,6 +81,8 @@ async def main():
 
     # 8. Callbacks — customer
     app.add_handler(CallbackQueryHandler(cb_my_orders_btn, pattern=r"^my_orders$"))
+    app.add_handler(CallbackQueryHandler(cb_my_orders_page, pattern=r"^my_orders_page:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_view_order, pattern=r"^view_order:"))
     app.add_handler(CallbackQueryHandler(cb_refresh_order, pattern=r"^refresh_order:"))
     app.add_handler(CallbackQueryHandler(cb_main_menu, pattern=r"^main_menu$"))
     app.add_handler(CallbackQueryHandler(cb_logout, pattern=r"^logout$"))
@@ -89,6 +91,8 @@ async def main():
 
     # 9. Callbacks — admin
     app.add_handler(CallbackQueryHandler(cb_admin_menu, pattern=r"^admin_menu$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_advanced, pattern=r"^adm_advanced$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_product_advanced, pattern=r"^adm_product_advanced$"))
     app.add_handler(CallbackQueryHandler(cb_admin_stats, pattern=r"^adm_stats$"))
     app.add_handler(CallbackQueryHandler(cb_admin_orders, pattern=r"^adm_orders$"))
     app.add_handler(CallbackQueryHandler(cb_orders_by_status, pattern=r"^adm_orders_(pending|processing|completed|failed)$"))

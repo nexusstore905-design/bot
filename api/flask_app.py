@@ -154,8 +154,15 @@ def create_order():
                 quantity=1,
                 player_id=player_id,
                 api_store_id=api_store_id,
+                supplier_fulfillment={
+                    "supplier_chat_id": target_chat,
+                    "category": product.category,
+                    "items": [{"product_name": product.name, "quantity": 1}],
+                },
             )
+            fulfillment = (await order_repo.get_fulfillments(order.id))[0]
             order_id = order.order_id
+            fulfillment_id = fulfillment.id
             created_at_iso = order.created_at.isoformat()
             status_val = order.status.value
             prod_name = product.name
@@ -171,6 +178,7 @@ def create_order():
             "route_source": route_source,
             "category": prod_cat,
             "api_store_id": api_store_id,
+            "fulfillment_id": fulfillment_id,
         }, None
 
     result, err = run_async(_process())
@@ -185,6 +193,14 @@ def create_order():
     supplier_notified = False
     if target_chat and BOT_TOKEN:
         try:
+            async def _mark_sending():
+                async with AsyncSessionLocal() as session:
+                    return await OrderRepository(session).mark_fulfillment_sending(
+                        result["fulfillment_id"]
+                    )
+            if not run_async(_mark_sending()):
+                raise RuntimeError("Supplier fulfillment is no longer queued")
+
             import urllib.request
             safe_order_id = html.escape(str(result['order_id']))
             safe_prod_name = html.escape(str(result['product_name']))
@@ -204,8 +220,8 @@ def create_order():
             )
             keyboard = {
                 "inline_keyboard": [[
-                    {"text": "✅  Done", "callback_data": f"sup_done:{result['order_id']}"},
-                    {"text": "❌  Error", "callback_data": f"sup_err:{result['order_id']}"}
+                    {"text": "✅  Done", "callback_data": f"sup_done:{result['order_id']}:{result['fulfillment_id']}"},
+                    {"text": "❌  Error", "callback_data": f"sup_err:{result['order_id']}:{result['fulfillment_id']}"}
                 ]]
             }
             req_data = json.dumps({
@@ -226,6 +242,7 @@ def create_order():
                     async def _save_msg():
                         async with AsyncSessionLocal() as session:
                             repo = OrderRepository(session)
+                            await repo.set_fulfillment_dispatched(result["fulfillment_id"], msg_id)
                             o = await repo.get_by_order_id(result["order_id"])
                             if o:
                                 await repo.set_supplier_msg(o, msg_id)
@@ -267,17 +284,26 @@ def create_order():
                 repo = OrderRepository(session)
                 failed_order = await repo.get_by_order_id(result["order_id"])
                 if failed_order:
-                    from database.models import OrderStatus
-                    await repo.update_status(
-                        failed_order,
-                        OrderStatus.failed,
+                    await repo.set_fulfillment_failed(
+                        result["fulfillment_id"],
+                        "Supplier notification failed; manual follow-up is required.",
+                    )
+                    await repo.refresh_order_status_from_fulfillments(
+                        failed_order.id,
                         changed_by="api",
                         note="Supplier notification failed; manual follow-up is required.",
                     )
         run_async(_mark_failed())
         result["status"] = "failed"
 
+    async def _read_final_status():
+        async with AsyncSessionLocal() as session:
+            order = await OrderRepository(session).get_by_order_id(result["order_id"])
+            return order.status.value if order else result["status"]
+    result["status"] = run_async(_read_final_status())
+
     result["supplier_notified"] = supplier_notified
+    result.pop("fulfillment_id", None)
 
     return jsonify(result), 200
 

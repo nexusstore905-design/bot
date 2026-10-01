@@ -1,10 +1,14 @@
 from datetime import datetime
+import json
 
 from sqlalchemy import select, func, desc, update, distinct
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from database.models import Order, OrderItem, OrderStatusHistory, OrderStatus, User
+from database.models import (
+    Order, OrderItem, OrderStatusHistory, OrderStatus, SupplierFulfillment,
+    SupplierFulfillmentStatus,
+)
 from utils.helpers import generate_order_id, utcnow
 
 
@@ -21,6 +25,7 @@ class OrderRepository:
         quantity: int,
         player_id: str,
         api_store_id: int | None = None,
+        supplier_fulfillment: dict | None = None,
     ) -> Order:
         # Generate unique order ID
         for _ in range(10):
@@ -56,6 +61,9 @@ class OrderRepository:
         )
         self.session.add(history)
 
+        if supplier_fulfillment:
+            self.session.add(self._make_fulfillment(order.id, supplier_fulfillment))
+
         await self.session.commit()
         await self.session.refresh(order)
         return order
@@ -65,6 +73,7 @@ class OrderRepository:
         user_id: int,
         cart_items: list[dict],
         player_id: str,
+        supplier_fulfillments: list[dict] | None = None,
     ) -> Order:
         # Generate unique order ID
         for _ in range(10):
@@ -100,9 +109,154 @@ class OrderRepository:
         )
         self.session.add(history)
 
+        for fulfillment in supplier_fulfillments or []:
+            self.session.add(self._make_fulfillment(order.id, fulfillment))
+
         await self.session.commit()
         await self.session.refresh(order)
         return order
+
+    @staticmethod
+    def _make_fulfillment(order_id: int, spec: dict) -> SupplierFulfillment:
+        return SupplierFulfillment(
+            order_id=order_id,
+            supplier_chat_id=int(spec["supplier_chat_id"]),
+            category=str(spec["category"]),
+            items_snapshot=json.dumps(spec["items"], ensure_ascii=False),
+            status=SupplierFulfillmentStatus.queued,
+        )
+
+    async def get_fulfillment_by_id(self, fulfillment_id: int) -> SupplierFulfillment | None:
+        result = await self.session.execute(
+            select(SupplierFulfillment)
+            .where(SupplierFulfillment.id == fulfillment_id)
+            .options(
+                selectinload(SupplierFulfillment.order).selectinload(Order.user),
+                selectinload(SupplierFulfillment.order).selectinload(Order.items),
+                selectinload(SupplierFulfillment.order).selectinload(Order.fulfillments),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_fulfillments(self, order_id: int) -> list[SupplierFulfillment]:
+        result = await self.session.execute(
+            select(SupplierFulfillment)
+            .where(SupplierFulfillment.order_id == order_id)
+            .order_by(SupplierFulfillment.id)
+        )
+        return list(result.scalars().all())
+
+    async def mark_fulfillment_sending(self, fulfillment_id: int) -> bool:
+        result = await self.session.execute(
+            update(SupplierFulfillment)
+            .where(
+                SupplierFulfillment.id == fulfillment_id,
+                SupplierFulfillment.status == SupplierFulfillmentStatus.queued,
+            )
+            .values(status=SupplierFulfillmentStatus.sending, updated_at=utcnow())
+        )
+        await self.session.commit()
+        return result.rowcount == 1
+
+    async def set_fulfillment_dispatched(self, fulfillment_id: int, message_id: int) -> bool:
+        await self.session.execute(
+            update(SupplierFulfillment)
+            .where(SupplierFulfillment.id == fulfillment_id)
+            .values(supplier_msg_id=message_id, updated_at=utcnow())
+        )
+        result = await self.session.execute(
+            update(SupplierFulfillment)
+            .where(
+                SupplierFulfillment.id == fulfillment_id,
+                SupplierFulfillment.status == SupplierFulfillmentStatus.sending,
+            )
+            .values(status=SupplierFulfillmentStatus.pending, updated_at=utcnow())
+        )
+        await self.session.commit()
+        return result.rowcount == 1
+
+    async def set_fulfillment_failed(self, fulfillment_id: int, reason: str) -> bool:
+        result = await self.session.execute(
+            update(SupplierFulfillment)
+            .where(
+                SupplierFulfillment.id == fulfillment_id,
+                SupplierFulfillment.status.in_((
+                    SupplierFulfillmentStatus.queued,
+                    SupplierFulfillmentStatus.sending,
+                )),
+            )
+            .values(
+                status=SupplierFulfillmentStatus.failed,
+                failure_note=reason,
+                updated_at=utcnow(),
+            )
+        )
+        await self.session.commit()
+        return result.rowcount == 1
+
+    async def update_fulfillment_status(
+        self,
+        fulfillment: SupplierFulfillment,
+        new_status: SupplierFulfillmentStatus,
+        changed_by: str,
+    ) -> bool:
+        result = await self.session.execute(
+            update(SupplierFulfillment)
+            .where(
+                SupplierFulfillment.id == fulfillment.id,
+                SupplierFulfillment.status.in_((
+                    SupplierFulfillmentStatus.sending,
+                    SupplierFulfillmentStatus.pending,
+                )),
+            )
+            .values(
+                status=new_status,
+                changed_by=changed_by,
+                failure_note="Supplier marked this group as ERROR." if new_status == SupplierFulfillmentStatus.failed else None,
+                updated_at=utcnow(),
+            )
+        )
+        if result.rowcount != 1:
+            await self.session.refresh(fulfillment)
+            return False
+
+        fulfillment.status = new_status
+        await self.session.commit()
+        return True
+
+    async def refresh_order_status_from_fulfillments(
+        self, order_id: int, changed_by: str, note: str | None = None,
+    ) -> OrderStatus | None:
+        for _ in range(3):
+            order = await self.session.get(Order, order_id)
+            if order is None:
+                return None
+            await self.session.refresh(order)
+            result = await self.session.execute(
+                select(SupplierFulfillment.status).where(SupplierFulfillment.order_id == order_id)
+            )
+            statuses = list(result.scalars().all())
+            if not statuses:
+                return order.status
+
+            terminal = {SupplierFulfillmentStatus.completed, SupplierFulfillmentStatus.failed}
+            if all(status in terminal for status in statuses):
+                new_status = (
+                    OrderStatus.completed
+                    if all(status == SupplierFulfillmentStatus.completed for status in statuses)
+                    else OrderStatus.failed
+                )
+            elif any(status in terminal for status in statuses):
+                new_status = OrderStatus.processing
+            else:
+                new_status = OrderStatus.pending
+
+            if order.status == new_status:
+                return order.status
+            if await self.update_status(order, new_status, changed_by=changed_by, note=note):
+                await self.session.refresh(order)
+                return order.status
+        return order.status
 
     async def get_by_order_id(self, order_id: str, api_store_id: int | None = None) -> Order | None:
         statement = select(Order).where(Order.order_id == order_id)
@@ -110,7 +264,10 @@ class OrderRepository:
             statement = statement.where(Order.api_store_id == api_store_id)
         result = await self.session.execute(
             statement
-            .options(selectinload(Order.items), selectinload(Order.history), selectinload(Order.user))
+            .options(
+                selectinload(Order.items), selectinload(Order.history), selectinload(Order.user),
+                selectinload(Order.fulfillments),
+            )
         )
         return result.scalar_one_or_none()
 
@@ -220,20 +377,90 @@ class OrderRepository:
         await self.session.commit()
         return True
 
-    async def cancel_stale_pending(self, older_than: datetime) -> list[tuple[str, int]]:
-        """Atomically cancel pending orders older than a cutoff and return customer IDs."""
+    async def cancel_stale_pending(self, older_than: datetime) -> list[tuple[str, int, OrderStatus]]:
+        """Expire unclaimed supplier work and return order, customer, and final status."""
         result = await self.session.execute(
             select(Order)
-            .where(Order.status == OrderStatus.pending, Order.created_at <= older_than)
-            .options(selectinload(Order.user))
+            .where(
+                Order.status.in_((OrderStatus.pending, OrderStatus.processing)),
+                Order.created_at <= older_than,
+            )
+            .options(selectinload(Order.user), selectinload(Order.fulfillments))
         )
         candidates = list(result.scalars().all())
         if not candidates:
             return []
 
-        cancelled: list[tuple[str, int]] = []
+        expired_orders: list[tuple[str, int, OrderStatus]] = []
         updated_at = utcnow()
         for order in candidates:
+            fulfillments = list(order.fulfillments)
+            if fulfillments:
+                open_statuses = (
+                    SupplierFulfillmentStatus.queued,
+                    SupplierFulfillmentStatus.sending,
+                    SupplierFulfillmentStatus.pending,
+                )
+                open_fulfillments = [f for f in fulfillments if f.status in open_statuses]
+                if not open_fulfillments:
+                    continue
+                expired_fulfillment_ids: list[int] = []
+                for fulfillment in open_fulfillments:
+                    timeout_result = await self.session.execute(
+                        update(SupplierFulfillment)
+                        .where(
+                            SupplierFulfillment.id == fulfillment.id,
+                            SupplierFulfillment.status.in_(open_statuses),
+                        )
+                        .values(
+                            status=SupplierFulfillmentStatus.failed,
+                            failure_note="Supplier did not respond within 10 minutes.",
+                            updated_at=updated_at,
+                        )
+                    )
+                    if timeout_result.rowcount == 1:
+                        expired_fulfillment_ids.append(fulfillment.id)
+                if not expired_fulfillment_ids:
+                    continue
+                remaining_result = await self.session.execute(
+                    select(SupplierFulfillment.status).where(
+                        SupplierFulfillment.order_id == order.id,
+                        SupplierFulfillment.id.not_in(expired_fulfillment_ids),
+                    )
+                )
+                remaining_statuses = list(remaining_result.scalars().all())
+                had_supplier_result = any(
+                    status in (SupplierFulfillmentStatus.completed, SupplierFulfillmentStatus.failed)
+                    for status in remaining_statuses
+                )
+                final_status = OrderStatus.failed if had_supplier_result else OrderStatus.cancelled
+                for _ in range(3):
+                    await self.session.refresh(order)
+                    old_status = order.status
+                    if old_status not in (OrderStatus.pending, OrderStatus.processing):
+                        break
+                    order_update = await self.session.execute(
+                        update(Order)
+                        .where(Order.id == order.id, Order.status == old_status)
+                        .values(status=final_status, updated_at=updated_at)
+                    )
+                    if order_update.rowcount == 1:
+                        self.session.add(OrderStatusHistory(
+                            order_id=order.id,
+                            old_status=old_status.value,
+                            new_status=final_status.value,
+                            changed_by="auto_cancel",
+                            note="Supplier work expired after 10 minutes without a response.",
+                        ))
+                        expired_orders.append((order.order_id, order.user.telegram_id, final_status))
+                        break
+                # Persist child expiry even if a concurrent supplier action changed
+                # the parent order while this worker was running.
+                await self.session.commit()
+                continue
+
+            if order.status != OrderStatus.pending:
+                continue
             update_result = await self.session.execute(
                 update(Order)
                 .where(
@@ -253,11 +480,11 @@ class OrderRepository:
                 changed_by="auto_cancel",
                 note="Automatically cancelled after 10 minutes without supplier action.",
             ))
-            cancelled.append((order.order_id, order.user.telegram_id))
+            expired_orders.append((order.order_id, order.user.telegram_id, OrderStatus.cancelled))
 
-        if cancelled:
+        if expired_orders:
             await self.session.commit()
-        return cancelled
+        return expired_orders
 
     async def set_supplier_msg(self, order: Order, msg_id: int) -> None:
         order.supplier_msg_id = msg_id

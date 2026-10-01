@@ -4,13 +4,6 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 def admin_main_kb() -> InlineKeyboardMarkup:
-    is_on = not os.path.exists("maintenance.flag")
-    status_btn = (
-        InlineKeyboardButton("🟢  Service is on", callback_data="adm_toggle_power")
-        if is_on else
-        InlineKeyboardButton("🔴  Maintenance mode", callback_data="adm_toggle_power")
-    )
-    
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📦  Orders", callback_data="adm_orders"),
          InlineKeyboardButton("📊  Overview", callback_data="adm_stats")],
@@ -18,10 +11,23 @@ def admin_main_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("👥  Customers", callback_data="adm_users")],
         [InlineKeyboardButton("🔐  Access codes", callback_data="adm_pin"),
          InlineKeyboardButton("🔑  API settings", callback_data="adm_api_info")],
+        [InlineKeyboardButton("⚙️  Advanced settings", callback_data="adm_advanced")],
+        [InlineKeyboardButton("🏠  Customer menu", callback_data="main_menu")],
+    ])
+
+
+def admin_advanced_kb(is_on: bool | None = None) -> InlineKeyboardMarkup:
+    if is_on is None:
+        is_on = not os.path.exists("maintenance.flag")
+    status_btn = InlineKeyboardButton(
+        "🟢  Service is on" if is_on else "🔴  Maintenance mode",
+        callback_data="adm_toggle_power",
+    )
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏪  API stores", callback_data="adm_api_stores"),
          InlineKeyboardButton("🚦  Order limits", callback_data="adm_user_limits")],
         [status_btn],
-        [InlineKeyboardButton("🏠  Customer menu", callback_data="main_menu")],
+        [InlineKeyboardButton("◀  Admin menu", callback_data="admin_menu")],
     ])
 
 
@@ -44,16 +50,23 @@ def admin_products_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🗑  Remove",        callback_data="adm_remove_product")],
         [InlineKeyboardButton("📝  Rename product group", callback_data="adm_rename_group")],
         [InlineKeyboardButton("📋  Product list", callback_data="adm_list_products")],
+        [InlineKeyboardButton("🧰  Advanced product tools", callback_data="adm_product_advanced")],
+        [InlineKeyboardButton("◀  Back",          callback_data="admin_menu")],
+    ])
+
+
+def admin_product_advanced_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧹  Clean removed products", callback_data="adm_cleanup_removed")],
         [InlineKeyboardButton("🧨  Delete all & reset IDs", callback_data="adm_reset_products")],
-        [InlineKeyboardButton("◀  Back",          callback_data="admin_menu")],
+        [InlineKeyboardButton("◀  Products", callback_data="adm_products")],
     ])
 
 
 def cleanup_removed_products_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧹  Permanently clean unused products", callback_data="adm_cleanup_removed_confirm")],
-        [InlineKeyboardButton("✖  Cancel", callback_data="adm_products")],
+        [InlineKeyboardButton("✖  Cancel", callback_data="adm_product_advanced")],
     ])
 
 
@@ -126,7 +139,7 @@ def customer_date_result_kb(telegram_id: int) -> InlineKeyboardMarkup:
 def reset_all_products_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧨  Confirm: delete all and reset IDs", callback_data="adm_reset_products_confirm")],
-        [InlineKeyboardButton("✖  Cancel", callback_data="adm_products")],
+        [InlineKeyboardButton("✖  Cancel", callback_data="adm_product_advanced")],
     ])
 
 
@@ -160,10 +173,11 @@ def change_status_kb(order_id: str) -> InlineKeyboardMarkup:
     ])
 
 
-def supplier_done_error_kb(order_id: str) -> InlineKeyboardMarkup:
+def supplier_done_error_kb(order_id: str, fulfillment_id: int | None = None) -> InlineKeyboardMarkup:
+    action_suffix = f"{order_id}:{fulfillment_id}" if fulfillment_id is not None else order_id
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅  DONE",   callback_data=f"sup_done:{order_id}"),
-        InlineKeyboardButton("❌  ERROR",  callback_data=f"sup_error:{order_id}"),
+        InlineKeyboardButton("✅  DONE",   callback_data=f"sup_done:{action_suffix}"),
+        InlineKeyboardButton("❌  ERROR",  callback_data=f"sup_error:{action_suffix}"),
     ]])
 
 
