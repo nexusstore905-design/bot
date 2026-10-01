@@ -1312,107 +1312,45 @@ def get_admin_conversations() -> list[ConversationHandler]:
         CallbackQueryHandler(cb_admin_cancel_conv, pattern=r"^adm_cancel_conv$"),
     ]
 
-    search_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_search_order_start, pattern=r"^adm_search_order$")],
-        states={ADMIN_SEARCH_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_search_order)]},
-        fallbacks=common_fallbacks,
-        allow_reentry=True,
-        per_message=False,
-    )
-    add_product_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_add_product_start, pattern=r"^adm_add_product$")],
+    # Keep all admin workflows in one conversation. Separate ConversationHandlers
+    # can remain active together, and the first one registered then steals replies
+    # from later workflows (for example, edit-product consumes Add Store input).
+    admin_conversation = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(cb_search_order_start, pattern=r"^adm_search_order$"),
+            CallbackQueryHandler(cb_add_product_start, pattern=r"^adm_add_product$"),
+            CallbackQueryHandler(cb_set_supplier_start, pattern=r"^adm_set_supplier$"),
+            CallbackQueryHandler(cb_edit_name_start, pattern=r"^adm_edit_name$"),
+            CallbackQueryHandler(cb_rename_group_start, pattern=r"^adm_rename_group$"),
+            CallbackQueryHandler(cb_create_code_start, pattern=r"^adm_create_code$"),
+            CallbackQueryHandler(cb_revoke_code_start, pattern=r"^adm_revoke_code$"),
+            CallbackQueryHandler(cb_revoke_user_start, pattern=r"^adm_revoke_user$"),
+            CallbackQueryHandler(cb_reset_user_start, pattern=r"^adm_reset_user$"),
+            CallbackQueryHandler(cb_add_store_start, pattern=r"^adm_add_store$"),
+            CallbackQueryHandler(cb_store_limit_start, pattern=r"^store_limit:"),
+            CallbackQueryHandler(cb_set_user_limit_start, pattern=r"^adm_set_user_limit$"),
+        ],
         states={
+            ADMIN_SEARCH_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_search_order)],
             ADMIN_ADD_CAT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_cat)],
             ADMIN_ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_name)],
-        },
-        fallbacks=common_fallbacks,
-        allow_reentry=True,
-        per_message=False,
-    )
-    set_supplier_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_set_supplier_start, pattern=r"^adm_set_supplier$")],
-        states={
             ADMIN_SET_SUPPLIER: [
                 MessageHandler(filters.FORWARDED, admin_set_supplier_from_forward),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set_supplier_value),
             ],
-        },
-        fallbacks=common_fallbacks,
-        allow_reentry=True,
-        per_message=False,
-    )
-    edit_name_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_edit_name_start, pattern=r"^adm_edit_name$")],
-        states={
             ADMIN_EDIT_NAME_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_name_select)],
             ADMIN_EDIT_NAME_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_name_value)],
-        },
-        fallbacks=common_fallbacks,
-        allow_reentry=True,
-        per_message=False,
-    )
-    rename_group_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_rename_group_start, pattern=r"^adm_rename_group$")],
-        states={
             ADMIN_RENAME_GROUP_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_rename_group_select)],
             ADMIN_RENAME_GROUP_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_rename_group_value)],
-        },
-        fallbacks=common_fallbacks,
-        allow_reentry=True,
-        per_message=False,
-    )
-    create_code_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_create_code_start, pattern=r"^adm_create_code$")],
-        states={
             ADMIN_CREATE_CODE_LABEL: [
                 CallbackQueryHandler(cb_create_code_instant, pattern=r"^adm_code_instant$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_create_code),
-            ]
-        },
-        fallbacks=common_fallbacks,
-        allow_reentry=True,
-        per_message=False,
-    )
-    revoke_code_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_revoke_code_start, pattern=r"^adm_revoke_code$")],
-        states={ADMIN_REVOKE_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_revoke_code)]},
-        fallbacks=common_fallbacks,
-        allow_reentry=True,
-        per_message=False,
-    )
-    revoke_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_revoke_user_start, pattern=r"^adm_revoke_user$")],
-        states={ADMIN_REVOKE_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_revoke_user)]},
-        fallbacks=common_fallbacks,
-        allow_reentry=True,
-        per_message=False,
-    )
-    reset_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_reset_user_start, pattern=r"^adm_reset_user$")],
-        states={ADMIN_RESET_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_reset_user)]},
-        fallbacks=common_fallbacks,
-        allow_reentry=True,
-        per_message=False,
-    )
-    # API Store management
-    add_store_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_add_store_start, pattern=r"^adm_add_store$")],
-        states={ADMIN_ADD_STORE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_store_name)]},
-        fallbacks=common_fallbacks,
-        allow_reentry=True,
-        per_message=False,
-    )
-    store_limit_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_store_limit_start, pattern=r"^store_limit:")],
-        states={ADMIN_STORE_SET_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_store_set_limit)]},
-        fallbacks=common_fallbacks,
-        allow_reentry=True,
-        per_message=False,
-    )
-    # User order limits
-    user_limit_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_set_user_limit_start, pattern=r"^adm_set_user_limit$")],
-        states={
+            ],
+            ADMIN_REVOKE_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_revoke_code)],
+            ADMIN_REVOKE_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_revoke_user)],
+            ADMIN_RESET_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_reset_user)],
+            ADMIN_ADD_STORE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_store_name)],
+            ADMIN_STORE_SET_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_store_set_limit)],
             ADMIN_SET_USER_LIMIT_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set_user_limit_id)],
             ADMIN_SET_USER_LIMIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set_user_limit_value)],
         },
@@ -1422,9 +1360,4 @@ def get_admin_conversations() -> list[ConversationHandler]:
     )
 
     toggle_handler = CallbackQueryHandler(cb_toggle_power, pattern=r"^adm_toggle_power$")
-    return [
-        search_conv, add_product_conv, set_supplier_conv, edit_name_conv, rename_group_conv,
-        create_code_conv, revoke_code_conv, revoke_conv, reset_conv,
-        add_store_conv, store_limit_conv, user_limit_conv,
-        toggle_handler,
-    ]
+    return [admin_conversation, toggle_handler]
