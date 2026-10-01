@@ -1,8 +1,8 @@
 import re
-from sqlalchemy import delete, exists, select, func
+from sqlalchemy import delete, exists, select, func, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import OrderItem, Product
+from database.models import AppSetting, OrderItem, Product
 
 
 def _product_name_sort_key(name: str) -> tuple[int, int, str]:
@@ -92,6 +92,48 @@ class ProductRepository:
             await self.session.commit()
         _, preserved_count = await self.get_inactive_cleanup_counts()
         return deleted_count, preserved_count
+
+    async def get_full_reset_counts(self) -> tuple[int, int, int]:
+        """Return product rows, linked historical order items, and affected orders."""
+        product_count = await self.session.scalar(select(func.count()).select_from(Product))
+        item_count = await self.session.scalar(
+            select(func.count()).select_from(OrderItem).where(OrderItem.product_id.is_not(None))
+        )
+        order_count = await self.session.scalar(
+            select(func.count(func.distinct(OrderItem.order_id)))
+            .select_from(OrderItem)
+            .where(OrderItem.product_id.is_not(None))
+        )
+        return int(product_count or 0), int(item_count or 0), int(order_count or 0)
+
+    async def reset_all_products(self) -> tuple[int, int]:
+        """Delete every product, detach historical order items, and reset SQLite IDs."""
+        _, linked_items, _ = await self.get_full_reset_counts()
+        await self.session.execute(
+            update(OrderItem)
+            .where(OrderItem.product_id.is_not(None))
+            .values(product_id=None)
+        )
+        result = await self.session.execute(delete(Product))
+        deleted_count = result.rowcount or 0
+
+        if self.session.get_bind().dialect.name == "sqlite":
+            sequence_table = await self.session.scalar(text(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'"
+            ))
+            if sequence_table:
+                await self.session.execute(text(
+                    "DELETE FROM sqlite_sequence WHERE name = 'products'"
+                ))
+
+        seed_marker = await self.session.get(AppSetting, "products_seeded")
+        if seed_marker is None:
+            self.session.add(AppSetting(key="products_seeded", value="true"))
+        else:
+            seed_marker.value = "true"
+
+        await self.session.commit()
+        return deleted_count, linked_items
 
     async def get_categories(self) -> list[str]:
         result = await self.session.execute(
@@ -230,6 +272,9 @@ class ProductRepository:
         return True
 
     async def seed_defaults(self) -> None:
+        seed_marker = await self.session.get(AppSetting, "products_seeded")
+        if seed_marker is not None and seed_marker.value == "true":
+            return
         count_result = await self.session.execute(select(func.count()).select_from(Product))
         if count_result.scalar() == 0:
             defaults = [
@@ -242,4 +287,5 @@ class ProductRepository:
             ]
             for cat, name in defaults:
                 self.session.add(Product(category=cat, name=name))
-            await self.session.commit()
+        self.session.add(AppSetting(key="products_seeded", value="true"))
+        await self.session.commit()

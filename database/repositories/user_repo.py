@@ -3,10 +3,10 @@ from typing import Optional, List
 import secrets
 import string
 
-from sqlalchemy import select, update
+from sqlalchemy import distinct, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import User, AccessCode, AuthStatus
+from database.models import Order, User, AccessCode, AuthStatus
 from config.settings import MAX_PIN_ATTEMPTS, LOCKOUT_MINUTES, SESSION_HOURS
 
 
@@ -52,6 +52,23 @@ class UserRepository:
     async def get_all(self) -> List[User]:
         result = await self.session.execute(select(User).order_by(User.created_at.desc()))
         return list(result.scalars().all())
+
+    async def get_customer_page(
+        self, page: int = 0, page_size: int = 10
+    ) -> tuple[list[tuple[User, int]], int]:
+        """Return customers with lifetime order counts and total customer count."""
+        page = max(0, page)
+        result = await self.session.execute(
+            select(User, func.count(distinct(Order.id)))
+            .outerjoin(Order, Order.user_id == User.id)
+            .group_by(User.id)
+            .order_by(User.created_at.desc(), User.telegram_id)
+            .limit(page_size)
+            .offset(page * page_size)
+        )
+        customers = [(user, int(order_count or 0)) for user, order_count in result.all()]
+        total_result = await self.session.execute(select(func.count()).select_from(User))
+        return customers, int(total_result.scalar_one() or 0)
 
     async def is_locked(self, user: User) -> bool:
         if user.locked_until and user.locked_until > _utcnow():

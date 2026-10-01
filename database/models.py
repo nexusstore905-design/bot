@@ -60,6 +60,13 @@ class PinConfig(Base):
     invalidate_sessions: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
 class AccessCode(Base):
     """Admin-created invite codes — one per trusted user."""
     __tablename__ = "access_codes"
@@ -118,7 +125,10 @@ class OrderItem(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     order_id: Mapped[int] = mapped_column(Integer, ForeignKey("orders.id"), nullable=False)
-    product_id: Mapped[int] = mapped_column(Integer, ForeignKey("products.id"), nullable=False)
+    # Keep the product name snapshot for order history if products are reset.
+    product_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("products.id", ondelete="SET NULL"), nullable=True
+    )
     product_name: Mapped[str] = mapped_column(String(128), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 

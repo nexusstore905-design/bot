@@ -5,6 +5,8 @@ All functions are gated by is_admin() Telegram ID check.
 import html
 import logging
 import re
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 from telegram import Update
 from telegram.ext import (
     ContextTypes, ConversationHandler,
@@ -20,7 +22,9 @@ from database.models import OrderStatus
 from bot.middlewares.auth_middleware import is_admin
 from bot.keyboards.admin_kb import (
     admin_main_kb, admin_orders_kb, admin_products_kb,
-    cleanup_removed_products_kb,
+    cleanup_removed_products_kb, admin_customers_kb,
+    admin_customer_detail_kb, admin_customer_orders_kb,
+    customer_date_result_kb, reset_all_products_kb,
     admin_pin_kb, remove_products_kb, change_status_kb,
     api_stores_kb, store_actions_kb, user_limits_kb,
     create_code_options_kb,
@@ -31,6 +35,7 @@ from bot.states.states import (
     ADMIN_EDIT_NAME_SELECT, ADMIN_EDIT_NAME_VALUE,
     ADMIN_RENAME_GROUP_SELECT, ADMIN_RENAME_GROUP_VALUE,
     ADMIN_CHANGE_STATUS_ID, ADMIN_SEARCH_ORDER,
+    ADMIN_CUSTOMER_DATE_RANGE,
     ADMIN_REVOKE_USER, ADMIN_RESET_USER,
     ADMIN_CREATE_CODE_LABEL, ADMIN_REVOKE_CODE,
     ADMIN_ADD_STORE_NAME, ADMIN_STORE_SET_LIMIT,
@@ -272,28 +277,244 @@ async def cb_set_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Users ───────────────────────────────────────────────────────────
 
+CUSTOMER_PAGE_SIZE = 10
+CUSTOMER_ORDERS_PAGE_SIZE = 5
+PAKISTAN_TZ = ZoneInfo("Asia/Karachi")
+
+
+def _customer_page_text(customers, page: int, total: int) -> str:
+    if not customers:
+        return "No customers found."
+    total_pages = max(1, (total + CUSTOMER_PAGE_SIZE - 1) // CUSTOMER_PAGE_SIZE)
+    return (
+        "👥 <b>Customers</b>\n"
+        f"Page {page + 1} of {total_pages} · {total} customers\n\n"
+        "Choose a customer to see their order totals and history."
+    )
+
+
+def _local_datetime(value: datetime | None) -> str:
+    if value is None:
+        return "—"
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(PAKISTAN_TZ).strftime("%Y-%m-%d %H:%M PKT")
+
+
+def _customer_summary_lines(summary: dict[str, dict[str, int]]) -> list[str]:
+    total_orders = sum(values["orders"] for values in summary.values())
+    total_packages = sum(values["packages"] for values in summary.values())
+    labels = [
+        ("pending", "⏳ Pending"),
+        ("processing", "⚙️ Processing"),
+        ("completed", "✅ Completed"),
+        ("failed", "❌ Failed"),
+        ("cancelled", "🚫 Cancelled"),
+    ]
+    lines = [f"Total orders: <b>{total_orders}</b> · Packages: <b>{total_packages}</b>"]
+    for status, label in labels:
+        values = summary.get(status, {"orders": 0, "packages": 0})
+        lines.append(f"{label}: <b>{values['orders']}</b> orders · {values['packages']} packages")
+    return lines
+
+
+def _customer_date_bounds(text: str) -> tuple[datetime | None, datetime, str]:
+    """Parse a single cutoff date or an inclusive date range in Pakistan time."""
+    parts = re.split(r"\s+(?:to|through|until)\s+", text.strip(), maxsplit=1, flags=re.IGNORECASE)
+    try:
+        if len(parts) == 1:
+            cutoff = date.fromisoformat(parts[0].strip())
+            end_date = cutoff + timedelta(days=1)
+            label = f"All dates through {cutoff.isoformat()} (Pakistan time)"
+            start_at = None
+        else:
+            start_date = date.fromisoformat(parts[0].strip())
+            end_date_inclusive = date.fromisoformat(parts[1].strip())
+            if start_date > end_date_inclusive:
+                raise ValueError
+            end_date = end_date_inclusive + timedelta(days=1)
+            label = (
+                f"{start_date.isoformat()} through {end_date_inclusive.isoformat()} "
+                "(Pakistan time)"
+            )
+            start_at = datetime.combine(start_date, time.min, tzinfo=PAKISTAN_TZ).astimezone(timezone.utc)
+    except ValueError as exc:
+        raise ValueError("Enter YYYY-MM-DD or YYYY-MM-DD to YYYY-MM-DD.") from exc
+
+    end_at = datetime.combine(end_date, time.min, tzinfo=PAKISTAN_TZ).astimezone(timezone.utc)
+    return start_at, end_at, label
+
+
+async def _get_customer_page(session, page: int):
+    users, total = await UserRepository(session).get_customer_page(page, CUSTOMER_PAGE_SIZE)
+    return users, total, admin_customers_kb(users, page, total, CUSTOMER_PAGE_SIZE)
+
+
 @_admin_guard
 async def cb_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     async with AsyncSessionLocal() as session:
-        repo = UserRepository(session)
-        users = await repo.get_all()
+        customers, total, keyboard = await _get_customer_page(session, 0)
 
-    if not users:
+    if not total:
         await update.callback_query.message.reply_text("No users yet.", reply_markup=admin_main_kb())
         return
 
-    lines = ["━━━━━━━━━━━━━━━━━━━━━━━\n  👥  <b>USERS</b>\n━━━━━━━━━━━━━━━━━━━━━━━\n"]
-    for u in users[:30]:
-        status_icon = {"authenticated": "🟢", "unauthenticated": "⚪", "locked": "🔒", "revoked": "⛔"}.get(u.auth_status.value, "❓")
-        lines.append(
-            f"{status_icon}  <b>{u.full_name or u.username or 'Unknown'}</b>\n"
-            f"   ID: <code>{u.telegram_id}</code>  •  {u.auth_status.value}\n"
-        )
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
     await update.callback_query.message.reply_text(
-        "\n".join(lines), parse_mode="HTML", reply_markup=admin_pin_kb()
+        _customer_page_text(customers, 0, total), parse_mode="HTML", reply_markup=keyboard
     )
+
+
+@_admin_guard
+async def cb_customer_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    page = max(0, int(update.callback_query.data.split(":", 1)[1]))
+    async with AsyncSessionLocal() as session:
+        customers, total, keyboard = await _get_customer_page(session, page)
+    if page * CUSTOMER_PAGE_SIZE >= total and total:
+        page = max(0, (total - 1) // CUSTOMER_PAGE_SIZE)
+        async with AsyncSessionLocal() as session:
+            customers, total, keyboard = await _get_customer_page(session, page)
+    await update.callback_query.message.edit_text(
+        _customer_page_text(customers, page, total), parse_mode="HTML", reply_markup=keyboard
+    )
+
+
+@_admin_guard
+async def cb_customer_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    telegram_id = int(update.callback_query.data.split(":", 1)[1])
+    async with AsyncSessionLocal() as session:
+        user = await UserRepository(session).get_by_telegram_id(telegram_id)
+        if user is None:
+            await update.callback_query.message.reply_text("Customer not found.")
+            return
+        summary = await OrderRepository(session).summarize_user_orders(user.id)
+        latest_orders = await OrderRepository(session).get_by_user(user.id, limit=1)
+
+    name = html.escape(user.full_name or "Unknown", quote=False)
+    username = f"@{html.escape(user.username, quote=False)}" if user.username else "Not set"
+    last_order = "—"
+    if latest_orders:
+        last_order = f"{_local_datetime(latest_orders[0].created_at)} · {latest_orders[0].status.value}"
+    text = (
+        "👤 <b>Customer details</b>\n\n"
+        f"Name: <b>{name}</b>\n"
+        f"Username: {username}\n"
+        f"Telegram ID: <code>{user.telegram_id}</code>\n"
+        f"Access: {html.escape(user.auth_status.value)}\n"
+        f"Joined: {_local_datetime(user.created_at)}\n"
+        f"Last order: {last_order}\n\n"
+        "<b>All-time orders</b>\n"
+        + "\n".join(_customer_summary_lines(summary))
+    )
+    await update.callback_query.message.reply_text(
+        text, parse_mode="HTML", reply_markup=admin_customer_detail_kb(telegram_id)
+    )
+
+
+@_admin_guard
+async def cb_customer_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    _, telegram_id_text, page_text = update.callback_query.data.split(":", 2)
+    telegram_id, page = int(telegram_id_text), max(0, int(page_text))
+    offset = page * CUSTOMER_ORDERS_PAGE_SIZE
+    async with AsyncSessionLocal() as session:
+        user = await UserRepository(session).get_by_telegram_id(telegram_id)
+        if user is None:
+            await update.callback_query.message.reply_text("Customer not found.")
+            return
+        orders_repo = OrderRepository(session)
+        total = await orders_repo.count_by_user(user.id)
+        orders = await orders_repo.get_by_user(
+            user.id, limit=CUSTOMER_ORDERS_PAGE_SIZE, offset=offset
+        )
+
+    if not orders:
+        await update.callback_query.message.reply_text(
+            "This customer has no orders yet.",
+            reply_markup=admin_customer_detail_kb(telegram_id),
+        )
+        return
+
+    lines = [f"🧾 <b>Order history</b> · {total} total · Page {page + 1}\n"]
+    for order in orders:
+        items = ", ".join(
+            f"{html.escape(item.product_name, quote=False)} ×{item.quantity}"
+            for item in order.items
+        ) or "—"
+        icon = STATUS_ICONS.get(order.status.value, "📦")
+        lines.append(
+            f"{icon} <b>{html.escape(order.order_id)}</b> · {order.status.value.upper()}\n"
+            f"{_local_datetime(order.created_at)}\n"
+            f"Product: {items}\n"
+            f"Player ID: <code>{html.escape(order.player_id, quote=False)}</code>"
+        )
+    await update.callback_query.message.reply_text(
+        "\n\n".join(lines), parse_mode="HTML",
+        reply_markup=admin_customer_orders_kb(
+            telegram_id, page, offset + len(orders) < total
+        ),
+    )
+
+
+@_admin_guard
+async def cb_customer_dates_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    telegram_id = int(update.callback_query.data.split(":", 1)[1])
+    async with AsyncSessionLocal() as session:
+        user = await UserRepository(session).get_by_telegram_id(telegram_id)
+    if user is None:
+        await update.callback_query.message.reply_text("Customer not found.")
+        return ConversationHandler.END
+    context.user_data["admin_customer_date_telegram_id"] = telegram_id
+    await update.callback_query.message.reply_text(
+        "📅 Enter a date to count all orders up to that day, or enter a date range.\n\n"
+        "Examples:\n"
+        "• <code>2026-10-01</code> (from the beginning through this date)\n"
+        "• <code>2026-09-01 to 2026-10-01</code> (inclusive)\n\n"
+        "Dates use Pakistan time. Send /cancel to stop.",
+        parse_mode="HTML",
+    )
+    return ADMIN_CUSTOMER_DATE_RANGE
+
+
+async def admin_customer_date_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+    try:
+        start_at, end_at, label = _customer_date_bounds(update.message.text)
+    except ValueError as exc:
+        await update.message.reply_text(
+            f"❌ {exc}\nPlease enter a valid date or date range, for example <code>2026-10-01</code>.",
+            parse_mode="HTML",
+        )
+        return ADMIN_CUSTOMER_DATE_RANGE
+
+    telegram_id = context.user_data.pop("admin_customer_date_telegram_id", None)
+    if telegram_id is None:
+        await update.message.reply_text("Customer selection expired. Open Customers and select them again.")
+        return ConversationHandler.END
+
+    async with AsyncSessionLocal() as session:
+        user = await UserRepository(session).get_by_telegram_id(telegram_id)
+        if user is None:
+            await update.message.reply_text("Customer not found.")
+            return ConversationHandler.END
+        summary = await OrderRepository(session).summarize_user_orders(
+            user.id, start_at=start_at, end_at=end_at
+        )
+
+    name = html.escape(user.full_name or str(telegram_id), quote=False)
+    report = (
+        f"📅 <b>Orders for {name}</b>\n"
+        f"Period: {label}\n\n"
+        + "\n".join(_customer_summary_lines(summary))
+    )
+    await update.message.reply_text(
+        report, parse_mode="HTML", reply_markup=customer_date_result_kb(telegram_id)
+    )
+    return ConversationHandler.END
 
 
 # ─── Products ────────────────────────────────────────────────────────
@@ -377,6 +598,39 @@ async def cb_cleanup_removed_confirm(update: Update, context: ContextTypes.DEFAU
         "🧹 <b>Product cleanup finished</b>\n\n"
         f"Permanently deleted: <b>{deleted_count}</b>\n"
         f"Kept for old order history: <b>{preserved_count}</b>",
+        parse_mode="HTML", reply_markup=admin_products_kb(),
+    )
+
+
+@_admin_guard
+async def cb_reset_all_products_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    async with AsyncSessionLocal() as session:
+        product_count, linked_items, affected_orders = await ProductRepository(session).get_full_reset_counts()
+
+    await update.callback_query.message.reply_text(
+        "🧨 <b>Delete every product and reset IDs?</b>\n\n"
+        f"Product records to delete: <b>{product_count}</b>\n"
+        f"Past orders that use these products: <b>{affected_orders}</b>\n"
+        f"Historical product lines to detach: <b>{linked_items}</b>\n\n"
+        "Past orders and their saved product names will stay visible. Their old product IDs will be cleared. "
+        "All products and supplier group settings will be deleted, and the next product IDs will start at #1. "
+        "If another website uses product IDs, update those IDs after the reset. "
+        "This cannot be undone.",
+        parse_mode="HTML", reply_markup=reset_all_products_kb(),
+    )
+
+
+@_admin_guard
+async def cb_reset_all_products_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    async with AsyncSessionLocal() as session:
+        deleted_count, detached_items = await ProductRepository(session).reset_all_products()
+    await update.callback_query.message.edit_text(
+        "✅ <b>Product reset finished</b>\n\n"
+        f"Products deleted: <b>{deleted_count}</b>\n"
+        f"Old order product IDs cleared: <b>{detached_items}</b>\n\n"
+        "Old order history and product names are kept. Your next new product will use ID #1.",
         parse_mode="HTML", reply_markup=admin_products_kb(),
     )
 
@@ -1380,9 +1634,11 @@ def get_admin_conversations() -> list[ConversationHandler]:
             CallbackQueryHandler(cb_add_store_start, pattern=r"^adm_add_store$"),
             CallbackQueryHandler(cb_store_limit_start, pattern=r"^store_limit:"),
             CallbackQueryHandler(cb_set_user_limit_start, pattern=r"^adm_set_user_limit$"),
+            CallbackQueryHandler(cb_customer_dates_start, pattern=r"^adm_customer_dates:\d+$"),
         ],
         states={
             ADMIN_SEARCH_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_search_order)],
+            ADMIN_CUSTOMER_DATE_RANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_customer_date_range)],
             ADMIN_ADD_CAT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_cat)],
             ADMIN_ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_name)],
             ADMIN_SET_SUPPLIER: [

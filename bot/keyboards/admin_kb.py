@@ -45,6 +45,7 @@ def admin_products_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📝  Rename product group", callback_data="adm_rename_group")],
         [InlineKeyboardButton("📋  Product list", callback_data="adm_list_products")],
         [InlineKeyboardButton("🧹  Clean removed products", callback_data="adm_cleanup_removed")],
+        [InlineKeyboardButton("🧨  Delete all & reset IDs", callback_data="adm_reset_products")],
         [InlineKeyboardButton("◀  Back",          callback_data="admin_menu")],
     ])
 
@@ -65,6 +66,67 @@ def admin_pin_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⛔  Revoke User",  callback_data="adm_revoke_user"),
          InlineKeyboardButton("🔄  Reset User",   callback_data="adm_reset_user")],
         [InlineKeyboardButton("◀  Back",          callback_data="admin_menu")],
+    ])
+
+
+def admin_customers_kb(customers: list, page: int, total: int, page_size: int = 10) -> InlineKeyboardMarkup:
+    rows = []
+    for user, order_count in customers:
+        name = user.full_name or (f"@{user.username}" if user.username else str(user.telegram_id))
+        name = name.replace("\n", " ")[:24]
+        rows.append([InlineKeyboardButton(
+            f"👤 {name} · {order_count} orders",
+            callback_data=f"adm_customer:{user.telegram_id}",
+        )])
+
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    if total_pages > 1:
+        navigation = []
+        if page > 0:
+            navigation.append(InlineKeyboardButton("◀ Previous", callback_data=f"adm_customer_page:{page - 1}"))
+        if page + 1 < total_pages:
+            navigation.append(InlineKeyboardButton("Next ▶", callback_data=f"adm_customer_page:{page + 1}"))
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton("◀  Admin menu", callback_data="admin_menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_customer_detail_kb(telegram_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧾  Order history", callback_data=f"adm_customer_orders:{telegram_id}:0")],
+        [InlineKeyboardButton("📅  Count by date", callback_data=f"adm_customer_dates:{telegram_id}")],
+        [InlineKeyboardButton("◀  Customers", callback_data="adm_users")],
+    ])
+
+
+def admin_customer_orders_kb(telegram_id: int, page: int, has_next: bool) -> InlineKeyboardMarkup:
+    rows = []
+    navigation = []
+    if page > 0:
+        navigation.append(InlineKeyboardButton(
+            "◀ Previous", callback_data=f"adm_customer_orders:{telegram_id}:{page - 1}"
+        ))
+    if has_next:
+        navigation.append(InlineKeyboardButton(
+            "Next ▶", callback_data=f"adm_customer_orders:{telegram_id}:{page + 1}"
+        ))
+    if navigation:
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton("◀  Customer details", callback_data=f"adm_customer:{telegram_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def customer_date_result_kb(telegram_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("◀  Customer details", callback_data=f"adm_customer:{telegram_id}")],
+        [InlineKeyboardButton("👥  Customers", callback_data="adm_users")],
+    ])
+
+
+def reset_all_products_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧨  Confirm: delete all and reset IDs", callback_data="adm_reset_products_confirm")],
+        [InlineKeyboardButton("✖  Cancel", callback_data="adm_products")],
     ])
 
 

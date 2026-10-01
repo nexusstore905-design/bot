@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import select, func, desc, update
+from sqlalchemy import select, func, desc, update, distinct
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -114,15 +114,67 @@ class OrderRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_by_user(self, user_id: int, limit: int = 10) -> list[Order]:
-        result = await self.session.execute(
+    async def get_by_user(
+        self,
+        user_id: int,
+        limit: int = 10,
+        offset: int = 0,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+    ) -> list[Order]:
+        statement = (
             select(Order)
             .where(Order.user_id == user_id)
             .options(selectinload(Order.items))
             .order_by(desc(Order.created_at))
-            .limit(limit)
+        )
+        if start_at is not None:
+            statement = statement.where(Order.created_at >= start_at)
+        if end_at is not None:
+            statement = statement.where(Order.created_at < end_at)
+        result = await self.session.execute(
+            statement.limit(limit).offset(offset)
         )
         return list(result.scalars().all())
+
+    async def count_by_user(self, user_id: int) -> int:
+        result = await self.session.execute(
+            select(func.count()).select_from(Order).where(Order.user_id == user_id)
+        )
+        return result.scalar_one() or 0
+
+    async def summarize_user_orders(
+        self,
+        user_id: int,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Count the customer's orders and package quantities by status."""
+        summary = {
+            status.value: {"orders": 0, "packages": 0}
+            for status in OrderStatus
+        }
+        statement = (
+            select(
+                Order.status,
+                func.count(distinct(Order.id)),
+                func.coalesce(func.sum(OrderItem.quantity), 0),
+            )
+            .outerjoin(OrderItem, OrderItem.order_id == Order.id)
+            .where(Order.user_id == user_id)
+            .group_by(Order.status)
+        )
+        if start_at is not None:
+            statement = statement.where(Order.created_at >= start_at)
+        if end_at is not None:
+            statement = statement.where(Order.created_at < end_at)
+        result = await self.session.execute(statement)
+        for status, order_count, package_count in result.all():
+            summary[status.value] = {
+                "orders": int(order_count or 0),
+                "packages": int(package_count or 0),
+            }
+        return summary
 
     async def get_all(self, limit: int = 50, offset: int = 0) -> list[Order]:
         result = await self.session.execute(
