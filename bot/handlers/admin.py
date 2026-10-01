@@ -28,6 +28,7 @@ from bot.keyboards.customer_kb import main_menu_kb
 from bot.states.states import (
     ADMIN_SET_PIN, ADMIN_ADD_CAT, ADMIN_ADD_NAME, ADMIN_SET_SUPPLIER,
     ADMIN_EDIT_NAME_SELECT, ADMIN_EDIT_NAME_VALUE,
+    ADMIN_RENAME_GROUP_SELECT, ADMIN_RENAME_GROUP_VALUE,
     ADMIN_CHANGE_STATUS_ID, ADMIN_SEARCH_ORDER,
     ADMIN_REVOKE_USER, ADMIN_RESET_USER,
     ADMIN_CREATE_CODE_LABEL, ADMIN_REVOKE_CODE,
@@ -337,8 +338,8 @@ async def cb_add_product_start(update: Update, context: ContextTypes.DEFAULT_TYP
     group_hint = "\n\nExisting groups: " + ", ".join(groups) if groups else ""
     await update.callback_query.message.reply_text(
         "📂 <b>Enter the product group name</b>\n\n"
-        "This is the category customers open to see packages.\n"
-        "For example, enter <code>PUBG UC</code> for a UC package group. "
+        "Customers will tap this name first, then choose one of its packages.\n"
+        "For example, enter <code>PUBG UC Top Up</code>. "
         "To add more packages to a group, enter that group name again."
         f"{html.escape(group_hint, quote=False)}\n\n/cancel to stop",
         parse_mode="HTML",
@@ -357,7 +358,7 @@ async def admin_add_cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "💎 <b>Enter the packages or denominations</b>\n\n"
         "Send one package per line or separate them with commas.\n\n"
-        "Example for PUBG UC:\n"
+        "Example for PUBG UC Top Up:\n"
         "<code>60 UC\n325 UC\n660 UC\n1800 UC\n3850 UC\n8100 UC</code>\n\n"
         "You can include several new packages in one message.\n/cancel to stop",
         parse_mode="HTML",
@@ -419,6 +420,70 @@ async def admin_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+@_admin_guard
+async def cb_rename_group_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    async with AsyncSessionLocal() as session:
+        groups = await ProductRepository(session).get_categories()
+    if not groups:
+        await update.callback_query.message.reply_text("No product groups to rename.")
+        return ConversationHandler.END
+    names = "\n".join(f"• {html.escape(group, quote=False)}" for group in groups)
+    await update.callback_query.message.reply_text(
+        "📝 <b>Rename a product group</b>\n\n"
+        f"Current groups:\n{names}\n\n"
+        "Send the current group name exactly as shown:",
+        parse_mode="HTML",
+    )
+    return ADMIN_RENAME_GROUP_SELECT
+
+
+async def admin_rename_group_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+    requested = update.message.text.strip()
+    async with AsyncSessionLocal() as session:
+        groups = await ProductRepository(session).get_categories()
+    matched = next((group for group in groups if group.casefold() == requested.casefold()), None)
+    if not matched:
+        await update.message.reply_text("I could not find that group. Copy its exact name from the list and try again.")
+        return ADMIN_RENAME_GROUP_SELECT
+    context.user_data["rename_group_old"] = matched
+    await update.message.reply_text(
+        f"Current group: <b>{html.escape(matched, quote=False)}</b>\n\n"
+        "Send the new name. For example: <code>PUBG UC Top Up</code>",
+        parse_mode="HTML",
+    )
+    return ADMIN_RENAME_GROUP_VALUE
+
+
+async def admin_rename_group_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+    new_name = update.message.text.strip()
+    if not new_name or len(new_name) > 64:
+        await update.message.reply_text("Enter a new group name from 1 to 64 characters:")
+        return ADMIN_RENAME_GROUP_VALUE
+    old_name = context.user_data.pop("rename_group_old", "")
+    async with AsyncSessionLocal() as session:
+        count, result = await ProductRepository(session).rename_category(old_name, new_name)
+    if result == "already_exists":
+        await update.message.reply_text(
+            "That group name already exists. Choose another name, or add packages to that existing group instead."
+        )
+        context.user_data["rename_group_old"] = old_name
+        return ADMIN_RENAME_GROUP_VALUE
+    if not count:
+        await update.message.reply_text("I could not rename that group. Open Products and try again.")
+        return ConversationHandler.END
+    await update.message.reply_text(
+        f"✅ Product group renamed to <b>{html.escape(result, quote=False)}</b>.\n"
+        f"Packages kept: <b>{count}</b>. Supplier settings were kept.",
+        parse_mode="HTML", reply_markup=admin_products_kb(),
+    )
+    return ConversationHandler.END
+
+
 # ─── Set Supplier Group per Category ─────────────────────────────────
 
 @_admin_guard
@@ -430,20 +495,21 @@ async def cb_set_supplier_start(update: Update, context: ContextTypes.DEFAULT_TY
         await update.callback_query.message.reply_text("❌  No categories found. Add products first.")
         return ConversationHandler.END
 
-    lines = ["📡  <b>Set Supplier Group per Category</b>\n\n"
-             "<b>Routing:</b> A saved supplier group receives orders for its category. Other categories use the global <code>SUPPLIER_CHAT_ID</code> fallback.\n\n"
-             "Reply with:\n<code>CATEGORY | CHAT_ID</code>\n\n"
+    lines = ["📡  <b>Set Supplier Group per Product</b>\n\n"
+             "<b>Routing:</b> A saved supplier group receives orders for its product group. Other groups use the global <code>SUPPLIER_CHAT_ID</code> fallback.\n\n"
+             "Reply with:\n<code>PRODUCT GROUP | CHAT_ID</code>\n\n"
              "Examples:\n"
-             "  <code>PUBG UC | -1001234567890</code>\n"
+             "  <code>PUBG UC Top Up | -1001234567890</code>\n"
              "  <code>Free Fire | -1009876543210</code>\n\n"
+             "You can also send the product group name by itself, then forward any message from its Telegram supplier group. I will read the real group ID from the forwarded message.\n\n"
              "To <b>remove</b> a custom supplier (use global default):\n"
-             "  <code>PUBG UC | 0</code>\n\n"
-             "Current categories:\n"]
+             "  <code>PUBG UC Top Up | 0</code>\n\n"
+             "Current product groups:\n"]
     for cat in categories:
         async with AsyncSessionLocal() as session:
             sup_id = await ProductRepository(session).get_supplier_for_category(cat)
         sup_text = f"<code>{sup_id}</code>" if sup_id else "<i>default</i>"
-        lines.append(f"  📂  <b>{cat}</b> → {sup_text}")
+        lines.append(f"  📂  <b>{html.escape(cat, quote=False)}</b> → {sup_text}")
     lines.append("\n/cancel to abort")
     await update.callback_query.message.reply_text("\n".join(lines), parse_mode="HTML")
     return ADMIN_SET_SUPPLIER
@@ -453,91 +519,146 @@ async def admin_set_supplier_value(update: Update, context: ContextTypes.DEFAULT
     if not is_admin(update.effective_user.id): return ConversationHandler.END
     text = update.message.text.strip()
     if "|" not in text:
-        await update.message.reply_text(
-            "❌  Wrong format. Use:\n<code>CATEGORY | CHAT_ID</code>\n\nExample:\n<code>PUBG UC | -1001234567890</code>\n\nTry again or /cancel",
-            parse_mode="HTML"
-        )
-        return ADMIN_SET_SUPPLIER
-
-    parts = text.split("|", 1)
-    category_input = parts[0].strip()
-    raw_chat_id = parts[1].strip()
-
-    supplier_chat_id = None
-    if raw_chat_id != "0" and raw_chat_id.lower() != "default":
-        # Normalize chat ID
-        clean_id = raw_chat_id.replace(" ", "")
-        digits = clean_id.lstrip("-")
-        if not digits.isdigit():
-            await update.message.reply_text("❌  Chat ID must be a valid number (e.g. -1001234567890). Try again or /cancel")
+        async with AsyncSessionLocal() as session:
+            categories = await ProductRepository(session).get_categories()
+        matched_category = next((c for c in categories if c.casefold() == text.casefold()), None)
+        if matched_category:
+            context.user_data["supplier_forward_category"] = matched_category
+            await update.message.reply_text(
+                f"Now forward any message from the supplier group for <b>{html.escape(matched_category)}</b>.\n\n"
+                "I will use Telegram’s original group ID and send a test message there.\n"
+                "If you meant to enter an ID, send <code>PRODUCT GROUP | -1001234567890</code> instead.",
+                parse_mode="HTML",
+            )
             return ADMIN_SET_SUPPLIER
-
-        # Telegram supergroups start with -100
-        if not digits.startswith("100") and len(digits) >= 8:
-            digits = "100" + digits
-        supplier_chat_id = -int(digits)
-
-    async with AsyncSessionLocal() as session:
-        count, matched_cat = await ProductRepository(session).set_category_supplier(category_input, supplier_chat_id)
-
-    if count == 0:
         await update.message.reply_text(
-            f"❌  Category <b>{html.escape(category_input)}</b> not found in your products. Check /admin → Products.",
+            "❌  Send <code>PRODUCT GROUP | -1001234567890</code>, or send the exact product group name by itself and then forward a message from its supplier group.\n\nTry again or /cancel",
             parse_mode="HTML"
         )
         return ADMIN_SET_SUPPLIER
 
-    if not supplier_chat_id:
+    category_input, raw_chat_id = (part.strip() for part in text.split("|", 1))
+    if raw_chat_id == "0" or raw_chat_id.casefold() == "default":
+        async with AsyncSessionLocal() as session:
+            count, matched_cat = await ProductRepository(session).set_category_supplier(category_input, None)
+        if not count:
+            await update.message.reply_text(
+                f"❌ Product group <b>{html.escape(category_input)}</b> not found. Copy its name from the product list.",
+                parse_mode="HTML",
+            )
+            return ADMIN_SET_SUPPLIER
         await update.message.reply_text(
-            f"✅  Category <b>{html.escape(matched_cat)}</b> → supplier reset to <b>global default</b>.",
+            f"✅ <b>{html.escape(matched_cat)}</b> now uses the global default supplier.",
             parse_mode="HTML", reply_markup=admin_products_kb()
         )
         return ConversationHandler.END
 
-    # Test the same destination that order delivery will currently select.
-    target_chat, route_source = resolve_supplier_chat(supplier_chat_id)
-    test_ok = False
-    test_err = ""
+    # Keep the supplied ID exactly as typed. Rewriting it can point to a different chat.
     try:
+        supplier_chat_id = int(raw_chat_id.replace(" ", ""))
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Enter the full negative Telegram chat ID (for example <code>-1001234567890</code>), or use the forward-message method.",
+            parse_mode="HTML",
+        )
+        return ADMIN_SET_SUPPLIER
+    if supplier_chat_id >= 0:
+        await update.message.reply_text(
+            "❌ The chat ID must be negative and copied exactly from Telegram (usually it starts with <code>-100</code>). Or forward a message from the group to avoid typing the ID.",
+            parse_mode="HTML",
+        )
+        return ADMIN_SET_SUPPLIER
+
+    return await _verify_and_save_supplier(update, context, category_input, supplier_chat_id)
+
+
+async def admin_set_supplier_from_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Use the original group ID from an admin-forwarded group message."""
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+
+    category = context.user_data.get("supplier_forward_category")
+    if not category:
+        await update.message.reply_text("First send the product group name in Supplier groups, then forward a message from its supplier group.")
+        return ADMIN_SET_SUPPLIER
+
+    message = update.message
+    origin = getattr(message, "forward_origin", None)
+    source_chat = getattr(origin, "chat", None)
+    if source_chat is None:
+        source_chat = getattr(message, "forward_from_chat", None)
+    source_type = getattr(source_chat, "type", None)
+    source_id = getattr(source_chat, "id", None)
+    if source_id is None or source_type not in ("group", "supergroup"):
+        await update.message.reply_text(
+            "❌ I could not read a group ID from that forward. Forward a message directly from the supplier group (not from a person or channel).",
+        )
+        return ADMIN_SET_SUPPLIER
+
+    context.user_data.pop("supplier_forward_category", None)
+    return await _verify_and_save_supplier(update, context, category, int(source_id))
+
+
+async def _verify_and_save_supplier(update: Update, context: ContextTypes.DEFAULT_TYPE, category_input: str, supplier_chat_id: int):
+    """Confirm Telegram access before changing the saved supplier destination."""
+    async with AsyncSessionLocal() as session:
+        categories = await ProductRepository(session).get_categories()
+    matched_cat = next((cat for cat in categories if cat.casefold() == category_input.casefold()), None)
+    if not matched_cat:
+        await update.message.reply_text(
+            f"❌ Product group <b>{html.escape(category_input)}</b> not found. Copy its name from the product list.",
+            parse_mode="HTML",
+        )
+        return ADMIN_SET_SUPPLIER
+
+    target_chat, route_source = resolve_supplier_chat(supplier_chat_id)
+    bot_info = await context.bot.get_me()
+    try:
+        chat = await context.bot.get_chat(target_chat)
         await context.bot.send_message(
             chat_id=target_chat,
             text=(
                 f"🤖  <b>SUPPLIER GROUP CONNECTED</b>\n\n"
                 f"✅ This is the active destination for orders in:\n"
-                f"📂 Category: <b>{html.escape(matched_cat)}</b>\n"
+                f"📂 Product group: <b>{html.escape(matched_cat)}</b>\n"
                 f"🧭 Routing: <b>{route_source}</b>"
             ),
             parse_mode="HTML"
         )
-        test_ok = True
     except Exception as e:
-        test_err = str(e)
-        logger.warning("Supplier test message to %s failed (%s)", target_chat, type(e).__name__)
+        logger.warning("Supplier test failed for chat %s using bot @%s (%s): %s", target_chat, bot_info.username, type(e).__name__, e)
+        detail = html.escape(str(e), quote=False)
+        if "chat not found" in str(e).casefold():
+            suggestion = (
+                "Telegram cannot find that group for this bot. This usually means the ID is not the ID of the group this bot can see, "
+                "or the running bot token belongs to a different bot. Use the forward-message method so I can read the exact ID, "
+                "and confirm this same bot (@" + html.escape(bot_info.username or "unknown", quote=False) + ") is in the group."
+            )
+        else:
+            suggestion = "Telegram found the destination but rejected the test. Check this bot’s permission to send messages in that group."
+        await update.message.reply_text(
+            f"❌ <b>Group not connected</b>\n\n"
+            f"Product group: <b>{html.escape(matched_cat)}</b>\n"
+            f"ID tried: <code>{target_chat}</code>\n"
+            f"Bot: <b>@{html.escape(bot_info.username or 'unknown')}</b>\n"
+            f"Telegram error: <code>{detail}</code>\n\n{suggestion}\n\n"
+            "I did not replace the previously saved supplier destination.",
+            parse_mode="HTML", reply_markup=admin_products_kb(),
+        )
+        return ConversationHandler.END
 
-    if test_ok:
-        await update.message.reply_text(
-            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"  ✅  <b>SUPPLIER GROUP LINKED</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📂  Category: <b>{html.escape(matched_cat)}</b>\n"
-            f"📡  Active Supplier Chat ID: <code>{target_chat}</code> (<b>{route_source}</b>)\n"
-            f"📦  Products Updated: <b>{count}</b>\n\n"
-            f"🎉 <b>Test message sent to the active order destination.</b>",
-            parse_mode="HTML", reply_markup=admin_products_kb()
-        )
-    else:
-        await update.message.reply_text(
-            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"  ⚠️  <b>SAVED BUT NOT REACHABLE</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📂  Category: <b>{html.escape(matched_cat)}</b>\n"
-            f"📡  Active destination: <code>{target_chat}</code> (<b>{route_source}</b>)\n\n"
-            f"❌  <b>Telegram Error:</b> <code>{html.escape(test_err)}</code>\n\n"
-            f"<b>👉 IMPORTANT:</b>\n"
-            f"1. Make sure your bot is added to that group!\n"
-            f"2. Promote the bot to <b>Administrator</b> in that group so it has permission to send messages.",
-            parse_mode="HTML", reply_markup=admin_products_kb()
-        )
+    async with AsyncSessionLocal() as session:
+        count, matched_cat = await ProductRepository(session).set_category_supplier(matched_cat, supplier_chat_id)
+    await update.message.reply_text(
+        f"✅ <b>Supplier group connected</b>\n\n"
+        f"Product group: <b>{html.escape(matched_cat)}</b>\n"
+        f"Supplier group: <b>{html.escape(chat.title or str(target_chat))}</b>\n"
+        f"Chat ID: <code>{target_chat}</code>\n"
+        f"Bot: <b>@{html.escape(bot_info.username or 'unknown')}</b>\n"
+        f"Packages updated: <b>{count}</b>\n\n"
+        "The bot sent a test message to this group.",
+        parse_mode="HTML", reply_markup=admin_products_kb(),
+    )
     return ConversationHandler.END
 
 
@@ -1211,7 +1332,10 @@ def get_admin_conversations() -> list[ConversationHandler]:
     set_supplier_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_set_supplier_start, pattern=r"^adm_set_supplier$")],
         states={
-            ADMIN_SET_SUPPLIER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set_supplier_value)],
+            ADMIN_SET_SUPPLIER: [
+                MessageHandler(filters.FORWARDED, admin_set_supplier_from_forward),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set_supplier_value),
+            ],
         },
         fallbacks=common_fallbacks,
         allow_reentry=True,
@@ -1222,6 +1346,16 @@ def get_admin_conversations() -> list[ConversationHandler]:
         states={
             ADMIN_EDIT_NAME_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_name_select)],
             ADMIN_EDIT_NAME_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_name_value)],
+        },
+        fallbacks=common_fallbacks,
+        allow_reentry=True,
+        per_message=False,
+    )
+    rename_group_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_rename_group_start, pattern=r"^adm_rename_group$")],
+        states={
+            ADMIN_RENAME_GROUP_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_rename_group_select)],
+            ADMIN_RENAME_GROUP_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_rename_group_value)],
         },
         fallbacks=common_fallbacks,
         allow_reentry=True,
@@ -1289,7 +1423,7 @@ def get_admin_conversations() -> list[ConversationHandler]:
 
     toggle_handler = CallbackQueryHandler(cb_toggle_power, pattern=r"^adm_toggle_power$")
     return [
-        search_conv, add_product_conv, set_supplier_conv, edit_name_conv, 
+        search_conv, add_product_conv, set_supplier_conv, edit_name_conv, rename_group_conv,
         create_code_conv, revoke_code_conv, revoke_conv, reset_conv,
         add_store_conv, store_limit_conv, user_limit_conv,
         toggle_handler,

@@ -39,7 +39,7 @@ def products_kb(products: list) -> InlineKeyboardMarkup:
         for p in products
     ]
     rows.append([
-        InlineKeyboardButton("◀  Catalog", callback_data="order_start"),
+        InlineKeyboardButton("◀  Product groups", callback_data="order_start"),
         InlineKeyboardButton("✖  Cancel", callback_data="cancel_order"),
     ])
     return InlineKeyboardMarkup(rows)

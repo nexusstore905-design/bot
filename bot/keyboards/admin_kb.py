@@ -42,6 +42,7 @@ def admin_products_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📡  Supplier groups", callback_data="adm_set_supplier")],
         [InlineKeyboardButton("✏️  Edit product", callback_data="adm_edit_name"),
          InlineKeyboardButton("🗑  Remove",        callback_data="adm_remove_product")],
+        [InlineKeyboardButton("📝  Rename product group", callback_data="adm_rename_group")],
         [InlineKeyboardButton("📋  Product list", callback_data="adm_list_products")],
         [InlineKeyboardButton("◀  Back",          callback_data="admin_menu")],
     ])

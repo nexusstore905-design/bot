@@ -50,21 +50,11 @@ class ProductRepository:
         return sorted(products, key=lambda p: _product_name_sort_key(p.name))
 
     async def get_supplier_for_category(self, category: str) -> int | None:
-        """Return the supplier_chat_id for this category (case-insensitive & flexible)."""
+        """Return the supplier chat saved for this exact product group."""
         cat_clean = category.strip().lower()
         result = await self.session.execute(
             select(Product.supplier_chat_id)
             .where(func.lower(Product.category) == cat_clean, Product.supplier_chat_id.isnot(None))
-            .limit(1)
-        )
-        row = result.scalar_one_or_none()
-        if row:
-            return int(row)
-
-        # Fallback to substring match (e.g. 'PUBG' matches 'PUBG UC')
-        result = await self.session.execute(
-            select(Product.supplier_chat_id)
-            .where(func.lower(Product.category).contains(cat_clean), Product.supplier_chat_id.isnot(None))
             .limit(1)
         )
         row = result.scalar_one_or_none()
@@ -139,13 +129,6 @@ class ProductRepository:
         products = list(result.scalars().all())
 
         if not products:
-            # Fallback substring match
-            result = await self.session.execute(
-                select(Product).where(func.lower(Product.category).contains(cat_clean))
-            )
-            products = list(result.scalars().all())
-
-        if not products:
             return 0, category
 
         matched_cat = products[0].category
@@ -153,6 +136,29 @@ class ProductRepository:
             p.supplier_chat_id = supplier_chat_id
         await self.session.commit()
         return len(products), matched_cat
+
+    async def rename_category(self, old_category: str, new_category: str) -> tuple[int, str]:
+        """Rename a product group without changing its packages or supplier IDs."""
+        old_clean = old_category.strip().casefold()
+        new_category = new_category.strip()
+        result = await self.session.execute(
+            select(Product).where(func.lower(Product.category) == old_clean)
+        )
+        products = list(result.scalars().all())
+        if not products or not new_category:
+            return 0, "not_found"
+
+        if new_category.casefold() != old_clean:
+            result = await self.session.execute(
+                select(Product.id).where(func.lower(Product.category) == new_category.casefold()).limit(1)
+            )
+            if result.scalar_one_or_none() is not None:
+                return 0, "already_exists"
+
+        for product in products:
+            product.category = new_category
+        await self.session.commit()
+        return len(products), products[0].category
 
     async def deactivate(self, product_id: int) -> bool:
         product = await self.get_by_id(product_id)
@@ -166,12 +172,12 @@ class ProductRepository:
         count_result = await self.session.execute(select(func.count()).select_from(Product))
         if count_result.scalar() == 0:
             defaults = [
-                ("PUBG UC", "60 UC"),
-                ("PUBG UC", "325 UC"),
-                ("PUBG UC", "660 UC"),
-                ("PUBG UC", "1800 UC"),
-                ("PUBG UC", "3850 UC"),
-                ("PUBG UC", "8100 UC"),
+                ("PUBG UC Top Up", "60 UC"),
+                ("PUBG UC Top Up", "325 UC"),
+                ("PUBG UC Top Up", "660 UC"),
+                ("PUBG UC Top Up", "1800 UC"),
+                ("PUBG UC Top Up", "3850 UC"),
+                ("PUBG UC Top Up", "8100 UC"),
             ]
             for cat, name in defaults:
                 self.session.add(Product(category=cat, name=name))

@@ -66,7 +66,9 @@ async def cb_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async with AsyncSessionLocal() as session:
         categories = await ProductRepository(session).get_categories()
-    context.user_data["order_has_categories"] = len(categories) > 1
+    # Always show the game/product group first, even when it is the only one.
+    # This keeps the intended flow: PUBG UC Top Up -> choose a UC package.
+    context.user_data["order_has_categories"] = True
 
     if not categories:
         await update.callback_query.edit_message_text(
@@ -75,20 +77,8 @@ async def cb_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    if len(categories) == 1:
-        context.user_data["temp_cat"] = categories[0]
-        async with AsyncSessionLocal() as session:
-            products = await ProductRepository(session).get_by_category(categories[0])
-
-        await update.callback_query.edit_message_text(
-            _order_step(context, 1, "Choose a package", "Select a package to add it to your cart."),
-            reply_markup=products_kb(products),
-            parse_mode="HTML",
-        )
-        return ORDER_SELECT_PRODUCT
-
     await update.callback_query.edit_message_text(
-        _order_step(context, 1, "Choose a category", "Select a category to see its available products."),
+        _order_step(context, 1, "Choose a product", "Select a product to see its available denominations."),
         reply_markup=categories_kb(categories),
         parse_mode="HTML",
     )
@@ -148,7 +138,7 @@ async def cb_select_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.edit_message_text(
         _order_step(
             context,
-            3 if context.user_data.get("order_has_categories") else 2,
+            3,
             html.escape(product.name, quote=False),
             "Choose how many you want.",
         ),
@@ -208,7 +198,7 @@ async def cb_cart_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.edit_message_text(
         _order_step(
             context,
-            4 if context.user_data.get("order_has_categories") else 3,
+            4,
             "Enter your PUBG Player ID",
             "Check the ID carefully before submitting.\n"
             "<i>It must contain 5–15 digits and start with 5.</i>",
@@ -323,7 +313,7 @@ async def cb_edit_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.edit_message_text(
         _order_step(
             context,
-            4 if context.user_data.get("order_has_categories") else 3,
+            4,
             "Enter your PUBG Player ID",
             "Send the correct ID below. It must contain 5–15 digits and start with 5.",
         ),
@@ -396,8 +386,8 @@ async def _forward_to_suppliers(context, order_id: str, cart_items: list, player
             )
         except Exception as e:
             logger.error(
-                "Failed to send order to supplier %s for category %s (%s)",
-                target_chat, category, type(e).__name__,
+                "Failed to send order %s to supplier %s for group %s via %s (%s): %s",
+                order_id, target_chat, category, route_source, type(e).__name__, e,
             )
             # Alert the admin immediately so they know why an order didn't go through!
             from config.settings import ADMIN_IDS
@@ -409,8 +399,9 @@ async def _forward_to_suppliers(context, order_id: str, cart_items: list, player
                             f"⚠️ <b>SUPPLIER DELIVERY ALERT</b>\n\n"
                             f"Order: <b>{safe_order_id}</b> (Category: {safe_cat})\n"
                             f"Failed to deliver to Group ID: <code>{target_chat}</code>\n\n"
-                            "<b>Telegram Error:</b> delivery failed; check the bot logs.\n\n"
-                            f"👉 <i>Check that your bot is added as an <b>Administrator</b> in that group!</i>"
+                            f"<b>Telegram Error:</b> <code>{html.escape(str(e), quote=False)}</code>\n"
+                            f"Routing used: <b>{route_source}</b>\n\n"
+                            "If Telegram says <code>Chat not found</code>, check that this exact bot account is in the group and that the saved chat ID came from that group."
                         ),
                         parse_mode="HTML"
                     )
