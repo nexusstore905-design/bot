@@ -322,6 +322,34 @@ async def cb_edit_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ORDER_ENTER_PLAYER_ID
 
 
+async def cb_reset_order_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear the current product selection and return to the product groups."""
+    if not await require_auth(update, context):
+        await update.callback_query.answer("🔐 Please authenticate first.", show_alert=True)
+        return ConversationHandler.END
+
+    await update.callback_query.answer()
+    context.user_data["cart"] = []
+    context.user_data.pop("player_id", None)
+    context.user_data.pop("temp_item", None)
+    context.user_data.pop("temp_cat", None)
+    async with AsyncSessionLocal() as session:
+        categories = await ProductRepository(session).get_categories()
+    context.user_data["order_has_categories"] = True
+    if not categories:
+        await update.callback_query.edit_message_text(
+            "😕  <b>No Products Available</b>\n\nCheck back soon!",
+            parse_mode="HTML", reply_markup=back_to_menu_kb()
+        )
+        return ConversationHandler.END
+    await update.callback_query.edit_message_text(
+        _order_step(context, 1, "Choose a product", "Select a product to see its available denominations."),
+        reply_markup=categories_kb(categories),
+        parse_mode="HTML",
+    )
+    return ORDER_SELECT_CATEGORY
+
+
 async def _forward_to_suppliers(context, order_id: str, cart_items: list, player_id: str):
     """
     Route order items to the configured supplier group.
@@ -531,6 +559,7 @@ def get_order_conversation() -> ConversationHandler:
             ],
             ORDER_CONFIRM: [
                 CallbackQueryHandler(cb_confirm_order, pattern=r"^confirm_order$"),
+                CallbackQueryHandler(cb_reset_order_products, pattern=r"^reset_order_products$"),
                 CallbackQueryHandler(cb_edit_player_id, pattern=r"^edit_player_id$"),
                 CallbackQueryHandler(cb_cancel, pattern=r"^cancel_order$"),
             ],

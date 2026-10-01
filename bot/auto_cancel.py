@@ -4,6 +4,7 @@ import asyncio
 import html
 import logging
 from datetime import timedelta
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from database.database import AsyncSessionLocal
 from database.repositories.order_repo import OrderRepository
@@ -27,10 +28,14 @@ async def cancel_expired_pending_orders(bot) -> int:
                 text=(
                     "⏱️  <b>ORDER AUTO-CANCELLED</b>\n\n"
                     f"Order <code>{html.escape(order_id)}</code> was cancelled because "
-                    "the supplier did not accept it within 10 minutes. "
-                    "Contact support if you still need this order."
+                    "the supplier did not mark it DONE or ERROR within 10 minutes. "
+                    "You can start a new order or view your order list below."
                 ),
                 parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🛍  Start a new order", callback_data="order_start")],
+                    [InlineKeyboardButton("📋  My orders", callback_data="my_orders")],
+                ]),
             )
         except Exception as exc:
             logger.warning(

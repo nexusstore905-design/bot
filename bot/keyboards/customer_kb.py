@@ -69,6 +69,7 @@ def cart_kb() -> InlineKeyboardMarkup:
 def confirm_order_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🚀  Submit order", callback_data="confirm_order")],
+        [InlineKeyboardButton("🛍  Reset product list", callback_data="reset_order_products")],
         [InlineKeyboardButton("✏️  Change Player ID", callback_data="edit_player_id"),
          InlineKeyboardButton("✖  Cancel", callback_data="cancel_order")],
     ])

@@ -219,3 +219,14 @@ class OrderRepository:
             )
             result[status.value] = r.scalar() or 0
         return result
+
+    async def get_stale_pending(self, minutes: int = 10) -> list[Order]:
+        """Return orders still pending after minutes minutes."""
+        from datetime import timedelta
+        cutoff = utcnow() - timedelta(minutes=minutes)
+        result = await self.session.execute(
+            select(Order)
+            .where(Order.status == OrderStatus.pending, Order.created_at <= cutoff)
+            .options(selectinload(Order.items), selectinload(Order.user))
+        )
+        return list(result.scalars().all())
