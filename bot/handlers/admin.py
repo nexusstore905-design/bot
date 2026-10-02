@@ -25,6 +25,7 @@ from bot.keyboards.admin_kb import (
     admin_product_advanced_kb,
     cleanup_removed_products_kb, admin_customers_kb,
     admin_customer_detail_kb, admin_customer_orders_kb,
+    admin_customer_unsettled_kb, confirm_customer_settlement_kb,
     customer_date_result_kb, reset_all_products_kb,
     admin_pin_kb, remove_products_kb, change_status_kb,
     api_stores_kb, store_actions_kb, user_limits_kb,
@@ -411,6 +412,7 @@ async def cb_customer_details(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         summary = await OrderRepository(session).summarize_user_orders(user.id)
         latest_orders = await OrderRepository(session).get_by_user(user.id, limit=1)
+        unsettled_count = await OrderRepository(session).count_unsettled_by_user(user.id)
 
     name = html.escape(user.full_name or "Unknown", quote=False)
     username = f"@{html.escape(user.username, quote=False)}" if user.username else "Not set"
@@ -425,11 +427,12 @@ async def cb_customer_details(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"Access: {html.escape(user.auth_status.value)}\n"
         f"Joined: {_local_datetime(user.created_at)}\n"
         f"Last order: {last_order}\n\n"
+        f"💰 Completed orders with payment not cleared: <b>{unsettled_count}</b>\n\n"
         "<b>All-time orders</b>\n"
         + "\n".join(_customer_summary_lines(summary))
     )
     await update.callback_query.message.edit_text(
-        text, parse_mode="HTML", reply_markup=admin_customer_detail_kb(telegram_id)
+        text, parse_mode="HTML", reply_markup=admin_customer_detail_kb(telegram_id, unsettled_count)
     )
 
 
@@ -464,8 +467,15 @@ async def cb_customer_orders(update: Update, context: ContextTypes.DEFAULT_TYPE)
             for item in order.items
         ) or "—"
         icon = STATUS_ICONS.get(order.status.value, "📦")
+        if order.settled_at:
+            payment_label = f"✅ Payment cleared · {_local_datetime(order.settled_at)}"
+        elif order.status == OrderStatus.completed:
+            payment_label = "💰 Payment not cleared"
+        else:
+            payment_label = "ℹ️ Payment tracking starts after completion"
         lines.append(
             f"{icon} <b>{html.escape(order.order_id)}</b> · {order.status.value.upper()}\n"
+            f"{payment_label}\n"
             f"{_local_datetime(order.created_at)}\n"
             f"Product: {items}\n"
             f"Player ID: <code>{html.escape(order.player_id, quote=False)}</code>"
@@ -475,6 +485,130 @@ async def cb_customer_orders(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=admin_customer_orders_kb(
             telegram_id, page, offset + len(orders) < total
         ),
+    )
+
+
+@_admin_guard
+async def cb_customer_unsettled(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    _, telegram_id_text, page_text = update.callback_query.data.split(":", 2)
+    telegram_id, page = int(telegram_id_text), max(0, int(page_text))
+    offset = page * CUSTOMER_ORDERS_PAGE_SIZE
+    async with AsyncSessionLocal() as session:
+        user = await UserRepository(session).get_by_telegram_id(telegram_id)
+        if user is None:
+            await update.callback_query.message.edit_text("Customer not found.")
+            return
+        orders_repo = OrderRepository(session)
+        total = await orders_repo.count_unsettled_by_user(user.id)
+        page_count = max(1, (total + CUSTOMER_ORDERS_PAGE_SIZE - 1) // CUSTOMER_ORDERS_PAGE_SIZE)
+        page = min(page, page_count - 1)
+        offset = page * CUSTOMER_ORDERS_PAGE_SIZE
+        orders = await orders_repo.get_unsettled_by_user(
+            user.id, limit=CUSTOMER_ORDERS_PAGE_SIZE, offset=offset
+        )
+
+    name = html.escape(user.full_name or user.username or str(telegram_id), quote=False)
+    if not orders:
+        text = (
+            f"💰 <b>Unsettled orders · {name}</b>\n──────────────\n\n"
+            "✅ No completed orders are waiting for payment clearance.\n\n"
+            "Completed recharges will appear here until they are marked paid."
+        )
+    else:
+        lines = [
+            f"💰 <b>Unsettled orders · {name}</b> · {total} total · Page {page + 1} of {page_count}\n",
+            "These completed recharges have not been marked paid.",
+        ]
+        for order in orders:
+            items = ", ".join(
+                f"{html.escape(item.product_name, quote=False)} ×{item.quantity}"
+                for item in order.items
+            ) or "—"
+            icon = STATUS_ICONS.get(order.status.value, "📦")
+            lines.append(
+                f"\n{icon} <b>{html.escape(order.order_id, quote=False)}</b> · {order.status.value.upper()}\n"
+                f"{_local_datetime(order.created_at)} · 💰 Payment not cleared\n"
+                f"Packages: {items}\n"
+                f"Player ID: <code>{html.escape(order.player_id, quote=False)}</code>"
+            )
+        text = "\n".join(lines)
+    await update.callback_query.message.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=admin_customer_unsettled_kb(
+            telegram_id, page, offset + len(orders) < total
+        ),
+    )
+
+
+@_admin_guard
+async def cb_customer_settle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    telegram_id = int(update.callback_query.data.split(":", 1)[1])
+    async with AsyncSessionLocal() as session:
+        user = await UserRepository(session).get_by_telegram_id(telegram_id)
+        if user is None:
+            await update.callback_query.message.edit_text("Customer not found.")
+            return
+        repo = OrderRepository(session)
+        high_watermark = await repo.get_unsettled_high_watermark_by_user(user.id)
+        unsettled_count = await repo.count_unsettled_by_user(
+            user.id, through_order_id=high_watermark
+        )
+
+    if not unsettled_count:
+        await update.callback_query.message.edit_text(
+            "✅ <b>No unsettled orders to clear.</b>\n\n"
+            "Completed recharges will appear here until they are marked paid.",
+            parse_mode="HTML",
+            reply_markup=admin_customer_detail_kb(telegram_id, 0),
+        )
+        return
+
+    name = html.escape(user.full_name or user.username or str(telegram_id), quote=False)
+    await update.callback_query.message.edit_text(
+        f"✅ <b>Mark orders as paid for {name}?</b>\n──────────────\n\n"
+        f"Orders to clear: <b>{unsettled_count}</b>\n\n"
+        "This marks the customer’s current completed, unsettled recharges as paid. Their full order history stays saved. "
+        "New completed recharges after this confirmation screen will remain marked payment not cleared.",
+        parse_mode="HTML",
+        reply_markup=confirm_customer_settlement_kb(telegram_id, high_watermark),
+    )
+
+
+@_admin_guard
+async def cb_customer_settle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    _, telegram_id_text, high_watermark_text = update.callback_query.data.split(":", 2)
+    telegram_id, high_watermark = int(telegram_id_text), int(high_watermark_text)
+    settled_at = datetime.now(timezone.utc)
+
+    async with AsyncSessionLocal() as session:
+        user = await UserRepository(session).get_by_telegram_id(telegram_id)
+        if user is None:
+            await update.callback_query.message.edit_text("Customer not found.")
+            return
+        changed_by = f"admin:{update.effective_user.full_name or update.effective_user.id}"
+        repo = OrderRepository(session)
+        settled_count = await repo.settle_unsettled_by_user(
+            user.id, settled_by, settled_at, high_watermark
+        )
+        unsettled_count = await repo.count_unsettled_by_user(user.id)
+
+    if settled_count:
+        text = (
+            f"✅ <b>{settled_count} order(s) marked paid.</b>\n\n"
+            "The orders remain in full history. Any newer completed recharges are still marked payment not cleared."
+        )
+    else:
+        text = (
+            "ℹ️ <b>No orders were changed.</b>\n\n"
+            "Another admin may already have cleared these orders. Newer completed recharges remain unsettled."
+        )
+    await update.callback_query.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=admin_customer_detail_kb(telegram_id, unsettled_count),
     )
 
 
@@ -573,10 +707,16 @@ async def cb_list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for p in products:
         if p.category != cat:
             cat = p.category
-            sup = f"<code>{p.supplier_chat_id}</code>" if p.supplier_chat_id else "<i>default</i>"
-            lines.append(f"\n📂 <b>{html.escape(cat, quote=False)}</b>  · Supplier: {sup}")
+            lines.append(f"\n📂 <b>{html.escape(cat, quote=False)}</b>")
         active = "✅" if p.is_active else "❌"
-        lines.append(f"{active} <code>#{p.id}</code>  {html.escape(p.name, quote=False)}")
+        target_chat, route_source = resolve_supplier_chat(p.supplier_chat_id)
+        supplier = (
+            f"<code>{target_chat}</code> · {route_source}"
+            if target_chat else "<i>not configured</i>"
+        )
+        lines.append(
+            f"{active} <code>#{p.id}</code>  {html.escape(p.name, quote=False)} → {supplier}"
+        )
     await update.callback_query.message.edit_text(
         "\n".join(lines), parse_mode="HTML", reply_markup=admin_products_kb()
     )
@@ -730,9 +870,9 @@ async def admin_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(products) > 20:
         package_lines.append(f"• …and {len(products) - 20} more")
     supplier_note = (
-        "\n📡 The group’s saved supplier destination was applied to these packages."
+        "\n📡 The existing package supplier route was applied to these packages."
         if products[0].supplier_chat_id else
-        "\n📡 No group supplier is saved; the global fallback may be used."
+        "\n📡 No single package route was inherited; the global fallback may be used."
     )
     skipped_note = f"\nSkipped existing names: <b>{len(skipped)}</b>." if skipped else ""
 
@@ -811,32 +951,32 @@ async def admin_rename_group_value(update: Update, context: ContextTypes.DEFAULT
     return ConversationHandler.END
 
 
-# ─── Set Supplier Group per Category ─────────────────────────────────
+# ─── Set Supplier Group per Package ─────────────────────────────────
 
 @_admin_guard
 async def cb_set_supplier_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     async with AsyncSessionLocal() as session:
-        categories = await ProductRepository(session).get_categories()
-    if not categories:
-        await update.callback_query.message.edit_text("❌  No categories found. Add products first.")
+        products = await ProductRepository(session).get_all_active()
+    if not products:
+        await update.callback_query.message.edit_text("❌  No packages found. Add products first.")
         return ConversationHandler.END
 
-    lines = ["📡  <b>Set Supplier Group per Product</b>\n\n"
-             "<b>Routing:</b> A saved supplier group receives orders for its product group. Other groups use the global <code>SUPPLIER_CHAT_ID</code> fallback.\n\n"
-             "Reply with:\n<code>PRODUCT GROUP | CHAT_ID</code>\n\n"
-             "Examples:\n"
-             "  <code>PUBG UC Top Up | -1001234567890</code>\n"
-             "  <code>Free Fire | -1009876543210</code>\n\n"
-             "You can also send the product group name by itself, then forward any message from its Telegram supplier group. I will read the real group ID from the forwarded message.\n\n"
-             "To <b>remove</b> a custom supplier (use global default):\n"
-             "  <code>PUBG UC Top Up | 0</code>\n\n"
-             "Current product groups:\n"]
-    for cat in categories:
-        async with AsyncSessionLocal() as session:
-            sup_id = await ProductRepository(session).get_supplier_for_category(cat)
-        sup_text = f"<code>{sup_id}</code>" if sup_id else "<i>default</i>"
-        lines.append(f"  📂  <b>{html.escape(cat, quote=False)}</b> → {sup_text}")
+    lines = ["📡  <b>Set Supplier Group per Package</b>\n\n"
+             "Each package can go to a different supplier, even within the same product group. Unassigned packages use the global <code>SUPPLIER_CHAT_ID</code> fallback.\n\n"
+             "Use the <code>#ID</code> shown beside the package name. Send <code>#ID | -1001234567890</code>.\n"
+             "To use the global default for one package, send <code>#PACKAGE_ID | 0</code>. You can also send a package ID by itself, then forward any message from its supplier group so I can read the exact group ID.\n\n"
+             "Current package routes:\n"]
+    for product in products:
+        target_chat, route_source = resolve_supplier_chat(product.supplier_chat_id)
+        route_text = (
+            f"<code>{target_chat}</code> · {route_source}"
+            if target_chat else "<i>not configured</i>"
+        )
+        lines.append(
+            f"  📦 <code>#{product.id}</code> <b>{html.escape(product.name, quote=False)}</b> "
+            f"({html.escape(product.category, quote=False)}) → {route_text}"
+        )
     lines.append("\n/cancel to abort")
     await update.callback_query.message.edit_text("\n".join(lines), parse_mode="HTML")
     return ADMIN_SET_SUPPLIER
@@ -846,36 +986,46 @@ async def admin_set_supplier_value(update: Update, context: ContextTypes.DEFAULT
     if not is_admin(update.effective_user.id): return ConversationHandler.END
     text = update.message.text.strip()
     if "|" not in text:
+        try:
+            product_id = int(text.removeprefix("#"))
+        except ValueError:
+            product_id = 0
         async with AsyncSessionLocal() as session:
-            categories = await ProductRepository(session).get_categories()
-        matched_category = next((c for c in categories if c.casefold() == text.casefold()), None)
-        if matched_category:
-            context.user_data["supplier_forward_category"] = matched_category
+            product = await ProductRepository(session).get_by_id(product_id) if product_id > 0 else None
+        if not product or not product.is_active:
             await update.message.reply_text(
-                f"Now forward any message from the supplier group for <b>{html.escape(matched_category)}</b>.\n\n"
-                "I will use Telegram’s original group ID and send a test message there.\n"
-                "If you meant to enter an ID, send <code>PRODUCT GROUP | -1001234567890</code> instead.",
+                "❌ Send an active package ID by itself, or use <code>#PACKAGE_ID | -1001234567890</code>.\n\nTry again or /cancel.",
                 parse_mode="HTML",
             )
             return ADMIN_SET_SUPPLIER
+        context.user_data["supplier_forward_product_id"] = product.id
         await update.message.reply_text(
-            "❌  Send <code>PRODUCT GROUP | -1001234567890</code>, or send the exact product group name by itself and then forward a message from its supplier group.\n\nTry again or /cancel",
-            parse_mode="HTML"
+            f"Now forward any message from the supplier group for <b>#{product.id} {html.escape(product.name, quote=False)}</b>.\n\n"
+            "I will use Telegram’s original group ID and send a test message there.\n"
+            "If you meant to enter an ID, send <code>#PACKAGE_ID | -1001234567890</code> instead.",
+            parse_mode="HTML",
         )
         return ADMIN_SET_SUPPLIER
 
-    category_input, raw_chat_id = (part.strip() for part in text.split("|", 1))
+    product_input, raw_chat_id = (part.strip() for part in text.split("|", 1))
+    try:
+        product_id = int(product_input.removeprefix("#"))
+    except ValueError:
+        product_id = 0
+    async with AsyncSessionLocal() as session:
+        product = await ProductRepository(session).get_by_id(product_id) if product_id > 0 else None
+    if not product or not product.is_active:
+        await update.message.reply_text(
+            f"❌ Active package <b>{html.escape(product_input, quote=False)}</b> not found. Use its numeric ID from the package list.",
+            parse_mode="HTML",
+        )
+        return ADMIN_SET_SUPPLIER
+
     if raw_chat_id == "0" or raw_chat_id.casefold() == "default":
         async with AsyncSessionLocal() as session:
-            count, matched_cat = await ProductRepository(session).set_category_supplier(category_input, None)
-        if not count:
-            await update.message.reply_text(
-                f"❌ Product group <b>{html.escape(category_input)}</b> not found. Copy its name from the product list.",
-                parse_mode="HTML",
-            )
-            return ADMIN_SET_SUPPLIER
+            await ProductRepository(session).set_product_supplier(product.id, None)
         await update.message.reply_text(
-            f"✅ <b>{html.escape(matched_cat)}</b> now uses the global default supplier.",
+            f"✅ <b>#{product.id} {html.escape(product.name, quote=False)}</b> now uses the global default supplier.",
             parse_mode="HTML", reply_markup=admin_products_kb()
         )
         return ConversationHandler.END
@@ -896,7 +1046,7 @@ async def admin_set_supplier_value(update: Update, context: ContextTypes.DEFAULT
         )
         return ADMIN_SET_SUPPLIER
 
-    return await _verify_and_save_supplier(update, context, category_input, supplier_chat_id)
+    return await _verify_and_save_supplier(update, context, product.id, supplier_chat_id)
 
 
 async def admin_set_supplier_from_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -904,9 +1054,9 @@ async def admin_set_supplier_from_forward(update: Update, context: ContextTypes.
     if not is_admin(update.effective_user.id):
         return ConversationHandler.END
 
-    category = context.user_data.get("supplier_forward_category")
-    if not category:
-        await update.message.reply_text("First send the product group name in Supplier groups, then forward a message from its supplier group.")
+    product_id = context.user_data.get("supplier_forward_product_id")
+    if not product_id:
+        await update.message.reply_text("First send a package ID in Supplier routing, then forward a message from its supplier group.")
         return ADMIN_SET_SUPPLIER
 
     message = update.message
@@ -922,18 +1072,17 @@ async def admin_set_supplier_from_forward(update: Update, context: ContextTypes.
         )
         return ADMIN_SET_SUPPLIER
 
-    context.user_data.pop("supplier_forward_category", None)
-    return await _verify_and_save_supplier(update, context, category, int(source_id))
+    context.user_data.pop("supplier_forward_product_id", None)
+    return await _verify_and_save_supplier(update, context, int(product_id), int(source_id))
 
 
-async def _verify_and_save_supplier(update: Update, context: ContextTypes.DEFAULT_TYPE, category_input: str, supplier_chat_id: int):
+async def _verify_and_save_supplier(update: Update, context: ContextTypes.DEFAULT_TYPE, product_id: int, supplier_chat_id: int):
     """Confirm Telegram access before changing the saved supplier destination."""
     async with AsyncSessionLocal() as session:
-        categories = await ProductRepository(session).get_categories()
-    matched_cat = next((cat for cat in categories if cat.casefold() == category_input.casefold()), None)
-    if not matched_cat:
+        product = await ProductRepository(session).get_by_id(product_id)
+    if not product or not product.is_active:
         await update.message.reply_text(
-            f"❌ Product group <b>{html.escape(category_input)}</b> not found. Copy its name from the product list.",
+            f"❌ Active package <code>#{product_id}</code> not found. Open Supplier routing and try again.",
             parse_mode="HTML",
         )
         return ADMIN_SET_SUPPLIER
@@ -946,8 +1095,9 @@ async def _verify_and_save_supplier(update: Update, context: ContextTypes.DEFAUL
             chat_id=target_chat,
             text=(
                 f"🤖  <b>SUPPLIER GROUP CONNECTED</b>\n\n"
-                f"✅ This is the active destination for orders in:\n"
-                f"📂 Product group: <b>{html.escape(matched_cat)}</b>\n"
+                f"✅ This is the active destination for package:\n"
+                f"📦 <b>#{product.id} {html.escape(product.name, quote=False)}</b>\n"
+                f"📂 Product group: <b>{html.escape(product.category, quote=False)}</b>\n"
                 f"🧭 Routing: <b>{route_source}</b>"
             ),
             parse_mode="HTML"
@@ -965,7 +1115,7 @@ async def _verify_and_save_supplier(update: Update, context: ContextTypes.DEFAUL
             suggestion = "Telegram found the destination but rejected the test. Check this bot’s permission to send messages in that group."
         await update.message.reply_text(
             f"❌ <b>Group not connected</b>\n\n"
-            f"Product group: <b>{html.escape(matched_cat)}</b>\n"
+            f"Package: <b>#{product.id} {html.escape(product.name, quote=False)}</b>\n"
             f"ID tried: <code>{target_chat}</code>\n"
             f"Bot: <b>@{html.escape(bot_info.username or 'unknown')}</b>\n"
             f"Telegram error: <code>{detail}</code>\n\n{suggestion}\n\n"
@@ -975,14 +1125,21 @@ async def _verify_and_save_supplier(update: Update, context: ContextTypes.DEFAUL
         return ConversationHandler.END
 
     async with AsyncSessionLocal() as session:
-        count, matched_cat = await ProductRepository(session).set_category_supplier(matched_cat, supplier_chat_id)
+        saved_product = await ProductRepository(session).set_product_supplier(product_id, supplier_chat_id)
+    if not saved_product:
+        await update.message.reply_text(
+            f"❌ Package <code>#{product_id}</code> is no longer active. The route was not changed.",
+            parse_mode="HTML", reply_markup=admin_products_kb(),
+        )
+        return ConversationHandler.END
     await update.message.reply_text(
         f"✅ <b>Supplier group connected</b>\n\n"
-        f"Product group: <b>{html.escape(matched_cat)}</b>\n"
+        f"Package: <b>#{saved_product.id} {html.escape(saved_product.name, quote=False)}</b>\n"
+        f"Product group: <b>{html.escape(saved_product.category, quote=False)}</b>\n"
         f"Supplier group: <b>{html.escape(chat.title or str(target_chat))}</b>\n"
         f"Chat ID: <code>{target_chat}</code>\n"
         f"Bot: <b>@{html.escape(bot_info.username or 'unknown')}</b>\n"
-        f"Packages updated: <b>{count}</b>\n\n"
+        "Packages updated: <b>1</b>\n\n"
         "The bot sent a test message to this group.",
         parse_mode="HTML", reply_markup=admin_products_kb(),
     )

@@ -300,6 +300,66 @@ class OrderRepository:
         )
         return result.scalar_one() or 0
 
+    async def count_unsettled_by_user(
+        self, user_id: int, through_order_id: int | None = None,
+    ) -> int:
+        statement = select(func.count()).select_from(Order).where(
+            Order.user_id == user_id,
+            Order.settled_at.is_(None),
+            Order.status == OrderStatus.completed,
+        )
+        if through_order_id is not None:
+            statement = statement.where(Order.id <= through_order_id)
+        result = await self.session.execute(statement)
+        return result.scalar_one() or 0
+
+    async def get_unsettled_high_watermark_by_user(self, user_id: int) -> int:
+        result = await self.session.execute(
+            select(func.max(Order.id)).where(
+                Order.user_id == user_id,
+                Order.settled_at.is_(None),
+                Order.status == OrderStatus.completed,
+            )
+        )
+        return result.scalar_one() or 0
+
+    async def get_unsettled_by_user(
+        self, user_id: int, limit: int = 10, offset: int = 0,
+        through_order_id: int | None = None,
+    ) -> list[Order]:
+        statement = (
+            select(Order)
+            .where(
+                Order.user_id == user_id,
+                Order.settled_at.is_(None),
+                Order.status == OrderStatus.completed,
+            )
+            .options(selectinload(Order.items))
+            .order_by(desc(Order.created_at))
+        )
+        if through_order_id is not None:
+            statement = statement.where(Order.id <= through_order_id)
+        result = await self.session.execute(statement.limit(limit).offset(offset))
+        return list(result.scalars().all())
+
+    async def settle_unsettled_by_user(
+        self, user_id: int, settled_by: str, settled_at: datetime,
+        through_order_id: int,
+    ) -> int:
+        """Mark existing orders paid without deleting history or clearing newer orders."""
+        result = await self.session.execute(
+            update(Order)
+            .where(
+                Order.user_id == user_id,
+                Order.settled_at.is_(None),
+                Order.status == OrderStatus.completed,
+                Order.id <= through_order_id,
+            )
+            .values(settled_at=settled_at, settled_by=settled_by)
+        )
+        await self.session.commit()
+        return max(result.rowcount or 0, 0)
+
     async def summarize_user_orders(
         self,
         user_id: int,

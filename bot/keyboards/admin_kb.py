@@ -45,7 +45,7 @@ def admin_orders_kb() -> InlineKeyboardMarkup:
 def admin_products_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕  Add group & packages", callback_data="adm_add_product")],
-        [InlineKeyboardButton("📡  Supplier groups", callback_data="adm_set_supplier")],
+        [InlineKeyboardButton("📡  Supplier routing", callback_data="adm_set_supplier")],
         [InlineKeyboardButton("✏️  Edit product", callback_data="adm_edit_name"),
          InlineKeyboardButton("🗑  Remove",        callback_data="adm_remove_product")],
         [InlineKeyboardButton("📝  Rename product group", callback_data="adm_rename_group")],
@@ -104,11 +104,52 @@ def admin_customers_kb(customers: list, page: int, total: int, page_size: int = 
     return InlineKeyboardMarkup(rows)
 
 
-def admin_customer_detail_kb(telegram_id: int) -> InlineKeyboardMarkup:
+def admin_customer_detail_kb(telegram_id: int, unsettled_count: int = 0) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"💰  Unsettled orders ({unsettled_count})",
+            callback_data=f"adm_customer_unsettled:{telegram_id}:0",
+        )],
+        [InlineKeyboardButton("✅  Clear paid orders", callback_data=f"adm_customer_settle:{telegram_id}")],
         [InlineKeyboardButton("🧾  Order history", callback_data=f"adm_customer_orders:{telegram_id}:0")],
         [InlineKeyboardButton("📅  Count by date", callback_data=f"adm_customer_dates:{telegram_id}")],
         [InlineKeyboardButton("◀  Customers", callback_data="adm_users")],
+    ])
+
+
+def admin_customer_unsettled_kb(
+    telegram_id: int, page: int, has_next: bool,
+) -> InlineKeyboardMarkup:
+    rows = []
+    navigation = []
+    if page > 0:
+        navigation.append(InlineKeyboardButton(
+            "◀ Previous", callback_data=f"adm_customer_unsettled:{telegram_id}:{page - 1}"
+        ))
+    if has_next:
+        navigation.append(InlineKeyboardButton(
+            "Next ▶", callback_data=f"adm_customer_unsettled:{telegram_id}:{page + 1}"
+        ))
+    if navigation:
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton(
+        "✅  Clear paid orders", callback_data=f"adm_customer_settle:{telegram_id}"
+    )])
+    rows.append([InlineKeyboardButton(
+        "🧾  Full order history", callback_data=f"adm_customer_orders:{telegram_id}:0"
+    )])
+    rows.append([InlineKeyboardButton(
+        "◀  Customer details", callback_data=f"adm_customer:{telegram_id}"
+    )])
+    return InlineKeyboardMarkup(rows)
+
+
+def confirm_customer_settlement_kb(telegram_id: int, cutoff_token: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "✅  Confirm: mark paid", callback_data=f"adm_customer_settle_confirm:{telegram_id}:{cutoff_token}"
+        )],
+        [InlineKeyboardButton("✖  Cancel", callback_data=f"adm_customer:{telegram_id}")],
     ])
 
 

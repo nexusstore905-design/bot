@@ -67,6 +67,10 @@ async def init_db() -> None:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        settled_timestamp_type = (
+            "TIMESTAMP WITH TIME ZONE"
+            if conn.dialect.name == "postgresql" else "TIMESTAMP"
+        )
         columns = await conn.run_sync(
             lambda sync_conn: {
                 column["name"] for column in inspect(sync_conn).get_columns("orders")
@@ -79,6 +83,18 @@ async def init_db() -> None:
             await conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_orders_api_store_id ON orders (api_store_id)"
             ))
+            columns.add("api_store_id")
+        if "settled_at" not in columns:
+            await conn.execute(text(
+                f"ALTER TABLE orders ADD COLUMN settled_at {settled_timestamp_type}"
+            ))
+        if "settled_by" not in columns:
+            await conn.execute(text(
+                "ALTER TABLE orders ADD COLUMN settled_by VARCHAR(128)"
+            ))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_orders_settled_at ON orders (settled_at)"
+        ))
 
     if needs_nullable_product_migration:
         if engine.dialect.name != "sqlite":

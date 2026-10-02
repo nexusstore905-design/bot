@@ -1,5 +1,5 @@
 """
-Customer order flow — no pricing shown, per-category supplier routing.
+Customer order flow — no pricing shown, per-package supplier routing.
 """
 import html
 import json
@@ -347,14 +347,14 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     normalized_cart: list[dict] = []
     fulfillment_specs: list[dict] = []
-    missing_categories: list[str] = []
+    missing_products: list[str] = []
     unavailable_products = False
     limit_error: str | None = None
     order = None
 
     async with AsyncSessionLocal() as session:
         products = ProductRepository(session)
-        cart_by_category: dict[str, list[dict]] = {}
+        items_by_route: dict[tuple[str, int], list[dict]] = {}
         for item in cart:
             try:
                 product = await products.get_by_id(int(item["product_id"]))
@@ -372,15 +372,14 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "quantity": quantity,
             }
             normalized_cart.append(normalized)
-            cart_by_category.setdefault(product.category, []).append(normalized)
+            target_chat, _ = resolve_supplier_chat(product.supplier_chat_id)
+            if not target_chat:
+                missing_products.append(f"{product.category}: {product.name}")
+            else:
+                items_by_route.setdefault((product.category, target_chat), []).append(normalized)
 
         if not unavailable_products:
-            for category, items in cart_by_category.items():
-                supplier_id = await products.get_supplier_for_category(category)
-                target_chat, _ = resolve_supplier_chat(supplier_id)
-                if not target_chat:
-                    missing_categories.append(category)
-                    continue
+            for (category, target_chat), items in items_by_route.items():
                 fulfillment_specs.append({
                     "supplier_chat_id": target_chat,
                     "category": category,
@@ -390,7 +389,7 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ],
                 })
 
-        if not unavailable_products and not missing_categories:
+        if not unavailable_products and not missing_products:
             from database.repositories.api_store_repo import UserOrderLimitRepository
             limit_repo = UserOrderLimitRepository(session)
             allowed, reason = await limit_repo.check_and_increment(user.id)
@@ -415,17 +414,17 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    if missing_categories:
-        category_list = ", ".join(html.escape(category, quote=False) for category in missing_categories)
+    if missing_products:
+        product_list = ", ".join(html.escape(name, quote=False) for name in missing_products)
         await _notify_admins(
             context,
             "⚠️ <b>ORDER BLOCKED: SUPPLIER NOT CONFIGURED</b>\n\n"
-            f"Customer: <code>{user.id}</code>\nProduct group(s): {category_list}\n"
-            "No order was created. Configure a supplier destination and ask the customer to try again.",
+            f"Customer: <code>{user.id}</code>\nPackage(s): {product_list}\n"
+            "No order was created. Configure a supplier destination for each package and ask the customer to try again.",
         )
         await update.callback_query.edit_message_text(
             "⚠️ <b>We can’t submit this order yet.</b>\n\n"
-            "A supplier is not available for one of these product groups. The administrator has been notified. "
+            "A supplier is not available for one of these packages. The administrator has been notified. "
             "Your cart was not charged or submitted.",
             parse_mode="HTML",
             reply_markup=back_to_menu_kb(),

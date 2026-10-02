@@ -54,28 +54,6 @@ class ProductRepository:
 
     async def cleanup_inactive_products(self) -> tuple[int, int]:
         """Permanently delete removed products only when no order history uses them."""
-        removed_result = await self.session.execute(
-            select(Product).where(
-                Product.is_active.is_(False),
-                Product.supplier_chat_id.isnot(None),
-            )
-        )
-        removed_with_supplier = list(removed_result.scalars().all())
-        active_result = await self.session.execute(
-            select(Product).where(Product.is_active.is_(True))
-        )
-        active_products = list(active_result.scalars().all())
-        active_by_category: dict[str, list[Product]] = {}
-        for product in active_products:
-            active_by_category.setdefault(product.category.casefold(), []).append(product)
-
-        routes_migrated = False
-        for removed in removed_with_supplier:
-            for active in active_by_category.get(removed.category.casefold(), []):
-                if active.supplier_chat_id is None:
-                    active.supplier_chat_id = removed.supplier_chat_id
-                    routes_migrated = True
-
         used_by_order = exists(
             select(OrderItem.id)
             .where(OrderItem.product_id == Product.id)
@@ -88,7 +66,7 @@ class ProductRepository:
             )
         )
         deleted_count = result.rowcount or 0
-        if deleted_count or routes_migrated:
+        if deleted_count:
             await self.session.commit()
         _, preserved_count = await self.get_inactive_cleanup_counts()
         return deleted_count, preserved_count
@@ -152,17 +130,6 @@ class ProductRepository:
         products = list(result.scalars().all())
         return sorted(products, key=lambda p: _product_name_sort_key(p.name))
 
-    async def get_supplier_for_category(self, category: str) -> int | None:
-        """Return the supplier chat saved for this exact product group."""
-        cat_clean = category.strip().lower()
-        result = await self.session.execute(
-            select(Product.supplier_chat_id)
-            .where(func.lower(Product.category) == cat_clean, Product.supplier_chat_id.isnot(None))
-            .limit(1)
-        )
-        row = result.scalar_one_or_none()
-        return int(row) if row else None
-
     async def get_by_id(self, product_id: int) -> Product | None:
         return await self.session.get(Product, product_id)
 
@@ -174,7 +141,7 @@ class ProductRepository:
         return product
 
     async def add_many(self, category: str, names: list[str]) -> tuple[list[Product], list[str]]:
-        """Add package names to a category, skipping duplicates and inheriting its supplier."""
+        """Add package names, inheriting a route only when active packages agree on one."""
         category = category.strip()
         if not category:
             return [], []
@@ -184,9 +151,11 @@ class ProductRepository:
         )
         existing_products = list(result.scalars().all())
         saved_category = existing_products[0].category if existing_products else category
-        supplier_chat_id = next(
-            (product.supplier_chat_id for product in existing_products if product.supplier_chat_id is not None),
-            None,
+        active_routes = {product.supplier_chat_id for product in existing_products if product.is_active}
+        supplier_chat_id = (
+            next(iter(active_routes))
+            if len(active_routes) == 1 and None not in active_routes
+            else None
         )
         existing_names = {product.name.strip().casefold() for product in existing_products}
         seen_names: set[str] = set()
@@ -223,22 +192,14 @@ class ProductRepository:
         await self.session.commit()
         return True
 
-    async def set_category_supplier(self, category: str, supplier_chat_id: int | None) -> tuple[int, str]:
-        """Set supplier_chat_id for ALL products matching category (case-insensitive). Returns (count, matched_cat)."""
-        cat_clean = category.strip().lower()
-        result = await self.session.execute(
-            select(Product).where(func.lower(Product.category) == cat_clean)
-        )
-        products = list(result.scalars().all())
-
-        if not products:
-            return 0, category
-
-        matched_cat = products[0].category
-        for p in products:
-            p.supplier_chat_id = supplier_chat_id
+    async def set_product_supplier(self, product_id: int, supplier_chat_id: int | None) -> Product | None:
+        """Set the supplier route for one active package only."""
+        product = await self.get_by_id(product_id)
+        if product is None or not product.is_active:
+            return None
+        product.supplier_chat_id = supplier_chat_id
         await self.session.commit()
-        return len(products), matched_cat
+        return product
 
     async def rename_category(self, old_category: str, new_category: str) -> tuple[int, str]:
         """Rename a product group without changing its packages or supplier IDs."""

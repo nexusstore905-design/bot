@@ -125,8 +125,7 @@ def create_order():
             if not product or not product.is_active:
                 return None, ("Invalid or inactive product ID", 400)
 
-            supplier_id = await product_repo.get_supplier_for_category(product.category)
-            target_chat, route_source = resolve_supplier_chat(supplier_id)
+            target_chat, route_source = resolve_supplier_chat(product.supplier_chat_id)
             if not target_chat:
                 return None, ("No supplier is configured for this product", 503)
 

@@ -3,10 +3,10 @@
 from config.settings import SUPPLIER_CHAT_ID
 
 
-def resolve_supplier_chat(category_chat_id: int | None) -> tuple[int | None, str]:
-    """Use a category destination when set, otherwise use the global fallback."""
-    if category_chat_id:
-        return category_chat_id, "category"
+def resolve_supplier_chat(product_chat_id: int | None) -> tuple[int | None, str]:
+    """Use a package destination when set, otherwise use the global fallback."""
+    if product_chat_id:
+        return product_chat_id, "product"
     if SUPPLIER_CHAT_ID:
         return SUPPLIER_CHAT_ID, "global"
     return None, "unconfigured"

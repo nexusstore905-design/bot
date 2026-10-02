@@ -95,7 +95,7 @@ class Product(Base):
     category: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    # Each category can route to a different supplier Telegram group/chat
+    # Each package can route to its own supplier Telegram group/chat.
     supplier_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -118,6 +118,8 @@ class Order(Base):
     player_id: Mapped[str] = mapped_column(String(64), nullable=False)
     supplier_msg_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    settled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    settled_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 

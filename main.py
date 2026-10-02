@@ -27,6 +27,7 @@ from bot.handlers.admin import (
     cb_cleanup_removed_start, cb_cleanup_removed_confirm,
     cb_reset_all_products_start, cb_reset_all_products_confirm,
     cb_customer_page, cb_customer_details, cb_customer_orders,
+    cb_customer_unsettled, cb_customer_settle_start, cb_customer_settle_confirm,
     cb_admin_pin, cb_list_codes, cb_admin_api_info,
     cb_api_stores, cb_list_stores, cb_store_view, cb_store_toggle, cb_store_delete,
     cb_user_limits, cb_list_user_limits,
@@ -52,7 +53,7 @@ async def main():
     logger.info(
         "Supplier routing: %s destination configured%s",
         "global" if SUPPLIER_CHAT_ID else "no global",
-        "; category destinations override it" if SUPPLIER_CHAT_ID else "; category destinations are used when set",
+        "; package destinations override it" if SUPPLIER_CHAT_ID else "; package destinations are used when set",
     )
     logger.info("Unanswered supplier work expires after 10 minutes; checking every 60 seconds.")
 
@@ -102,6 +103,9 @@ async def main():
     app.add_handler(CallbackQueryHandler(cb_customer_page, pattern=r"^adm_customer_page:"))
     app.add_handler(CallbackQueryHandler(cb_customer_details, pattern=r"^adm_customer:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_customer_orders, pattern=r"^adm_customer_orders:"))
+    app.add_handler(CallbackQueryHandler(cb_customer_unsettled, pattern=r"^adm_customer_unsettled:"))
+    app.add_handler(CallbackQueryHandler(cb_customer_settle_start, pattern=r"^adm_customer_settle:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_customer_settle_confirm, pattern=r"^adm_customer_settle_confirm:\d+:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_admin_products, pattern=r"^adm_products$"))
     app.add_handler(CallbackQueryHandler(cb_list_products, pattern=r"^adm_list_products$"))
     app.add_handler(CallbackQueryHandler(cb_cleanup_removed_start, pattern=r"^adm_cleanup_removed$"))
