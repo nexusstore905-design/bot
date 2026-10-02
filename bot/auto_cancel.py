@@ -15,7 +15,7 @@ from utils.helpers import utcnow
 logger = logging.getLogger(__name__)
 
 PENDING_ORDER_TIMEOUT = timedelta(minutes=10)
-AUTO_CANCEL_INTERVAL_SECONDS = 60
+AUTO_CANCEL_INTERVAL_SECONDS = 15
 
 
 async def cancel_expired_pending_orders(bot) -> int:
@@ -45,9 +45,14 @@ async def cancel_expired_pending_orders(bot) -> int:
                 text=(
                     ("⏱️  <b>ORDER AUTO-CANCELLED</b>\n\n" if cancelled else "⚠️  <b>ORDER NEEDS SUPPORT</b>\n\n")
                     + f"Order <code>{html.escape(order_id)}</code> "
-                    + ("was cancelled because no supplier responded within 10 minutes. " if cancelled else
-                       "could not be completed because a supplier did not respond within 10 minutes. ")
-                    + "Please contact support or start a new order."
+                    + (
+                        "was automatically cancelled because the supplier did not choose Done or Error within 10 minutes. "
+                        "If you have already paid, contact support about your payment. "
+                        if cancelled else
+                        "could not be completed because a supplier did not choose Done or Error within 10 minutes. "
+                        "Please contact support about this order. "
+                    )
+                    + "You can start a new order when ready."
                 ),
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([

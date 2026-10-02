@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 from sqlalchemy import select, func, desc, update, distinct
@@ -10,6 +10,13 @@ from database.models import (
     SupplierFulfillmentStatus,
 )
 from utils.helpers import generate_order_id, utcnow
+
+
+def _as_utc_aware(value: datetime) -> datetime:
+    """SQLite may return UTC timestamps without tzinfo despite timezone=True."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 class OrderRepository:
@@ -464,6 +471,28 @@ class OrderRepository:
                 open_fulfillments = [f for f in fulfillments if f.status in open_statuses]
                 if not open_fulfillments:
                     continue
+
+                # Start the supplier's response timer from the last state change
+                # made when its Telegram task was sent, not from order creation.
+                # A queued task still uses order age as a fallback in case it
+                # never made it to Telegram.
+                timed_out = any(
+                    (
+                        fulfillment.status in (
+                            SupplierFulfillmentStatus.sending,
+                            SupplierFulfillmentStatus.pending,
+                        )
+                        and _as_utc_aware(fulfillment.updated_at) <= _as_utc_aware(older_than)
+                    )
+                    or (
+                        fulfillment.status == SupplierFulfillmentStatus.queued
+                        and _as_utc_aware(order.created_at) <= _as_utc_aware(older_than)
+                    )
+                    for fulfillment in open_fulfillments
+                )
+                if not timed_out:
+                    continue
+
                 expired_fulfillment_ids: list[int] = []
                 for fulfillment in open_fulfillments:
                     timeout_result = await self.session.execute(
@@ -482,18 +511,9 @@ class OrderRepository:
                         expired_fulfillment_ids.append(fulfillment.id)
                 if not expired_fulfillment_ids:
                     continue
-                remaining_result = await self.session.execute(
-                    select(SupplierFulfillment.status).where(
-                        SupplierFulfillment.order_id == order.id,
-                        SupplierFulfillment.id.not_in(expired_fulfillment_ids),
-                    )
-                )
-                remaining_statuses = list(remaining_result.scalars().all())
-                had_supplier_result = any(
-                    status in (SupplierFulfillmentStatus.completed, SupplierFulfillmentStatus.failed)
-                    for status in remaining_statuses
-                )
-                final_status = OrderStatus.failed if had_supplier_result else OrderStatus.cancelled
+                # One supplier timeout cancels the full customer order. Any
+                # sibling supplier tasks still waiting are also closed below.
+                final_status = OrderStatus.cancelled
                 for _ in range(3):
                     await self.session.refresh(order)
                     old_status = order.status
