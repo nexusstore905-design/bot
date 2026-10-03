@@ -12,11 +12,6 @@ from database.models import (
 from utils.helpers import generate_order_id, utcnow
 
 
-def _as_utc_aware(value: datetime) -> datetime:
-    """SQLite may return UTC timestamps without tzinfo despite timezone=True."""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 class OrderRepository:
@@ -353,7 +348,7 @@ class OrderRepository:
         self, user_id: int, settled_by: str, settled_at: datetime,
         through_order_id: int,
     ) -> int:
-        """Mark existing orders paid without deleting history or clearing newer orders."""
+        """Mark completed, unsettled orders paid without deleting history or newer orders."""
         result = await self.session.execute(
             update(Order)
             .where(
@@ -365,7 +360,19 @@ class OrderRepository:
             .values(settled_at=settled_at, settled_by=settled_by)
         )
         await self.session.commit()
-        return max(result.rowcount or 0, 0)
+        # Some database drivers report a negative/unknown rowcount. Count the
+        # persisted rows in the same session so the admin receives a reliable result.
+        if result.rowcount is not None and result.rowcount >= 0:
+            return result.rowcount
+        verify = await self.session.execute(
+            select(func.count()).select_from(Order).where(
+                Order.user_id == user_id,
+                Order.settled_at == settled_at,
+                Order.settled_by == settled_by,
+                Order.id <= through_order_id,
+            )
+        )
+        return verify.scalar_one() or 0
 
     async def summarize_user_orders(
         self,
@@ -542,13 +549,3 @@ class OrderRepository:
             result[status.value] = r.scalar() or 0
         return result
 
-    async def get_stale_pending(self, minutes: int = 10) -> list[Order]:
-        """Return orders still pending after minutes minutes."""
-        from datetime import timedelta
-        cutoff = utcnow() - timedelta(minutes=minutes)
-        result = await self.session.execute(
-            select(Order)
-            .where(Order.status == OrderStatus.pending, Order.created_at <= cutoff)
-            .options(selectinload(Order.items), selectinload(Order.user))
-        )
-        return list(result.scalars().all())

@@ -6,7 +6,7 @@ import logging
 from flask import Flask, request, jsonify
 from sqlalchemy import text
 
-from config.settings import API_KEY, API_CORS_ORIGINS, BOT_TOKEN
+from config.settings import API_KEY, BOT_TOKEN
 from utils.supplier_routing import resolve_supplier_chat
 from database.database import AsyncSessionLocal
 from database.repositories.order_repo import OrderRepository

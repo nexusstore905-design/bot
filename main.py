@@ -28,6 +28,7 @@ from bot.handlers.admin import (
     cb_reset_all_products_start, cb_reset_all_products_confirm,
     cb_customer_page, cb_customer_details, cb_customer_orders,
     cb_customer_unsettled, cb_customer_settle_start, cb_customer_settle_confirm,
+    cb_reset_business_data_start, cb_reset_business_data_confirm,
     cb_admin_pin, cb_list_codes, cb_admin_api_info,
     cb_api_stores, cb_list_stores, cb_store_view, cb_store_toggle, cb_store_delete,
     cb_user_limits, cb_list_user_limits,
@@ -93,6 +94,8 @@ async def main():
     # 9. Callbacks — admin
     app.add_handler(CallbackQueryHandler(cb_admin_menu, pattern=r"^admin_menu$"))
     app.add_handler(CallbackQueryHandler(cb_admin_advanced, pattern=r"^adm_advanced$"))
+    app.add_handler(CallbackQueryHandler(cb_reset_business_data_start, pattern=r"^adm_reset_business_data$"))
+    app.add_handler(CallbackQueryHandler(cb_reset_business_data_confirm, pattern=r"^adm_reset_business_data_confirm$"))
     app.add_handler(CallbackQueryHandler(cb_admin_product_advanced, pattern=r"^adm_product_advanced$"))
     app.add_handler(CallbackQueryHandler(cb_admin_stats, pattern=r"^adm_stats$"))
     app.add_handler(CallbackQueryHandler(cb_admin_orders, pattern=r"^adm_orders$"))

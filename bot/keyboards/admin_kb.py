@@ -27,6 +27,7 @@ def admin_advanced_kb(is_on: bool | None = None) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏪  API stores", callback_data="adm_api_stores"),
          InlineKeyboardButton("🚦  Order limits", callback_data="adm_user_limits")],
         [status_btn],
+        [InlineKeyboardButton("🧨  Reset customers, orders & keys", callback_data="adm_reset_business_data")],
         [InlineKeyboardButton("◀  Admin menu", callback_data="admin_menu")],
     ])
 
@@ -181,6 +182,16 @@ def reset_all_products_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧨  Confirm: delete all and reset IDs", callback_data="adm_reset_products_confirm")],
         [InlineKeyboardButton("✖  Cancel", callback_data="adm_product_advanced")],
+    ])
+
+
+def reset_business_data_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🧨  Yes, permanently reset business data",
+            callback_data="adm_reset_business_data_confirm",
+        )],
+        [InlineKeyboardButton("✖  Cancel", callback_data="adm_advanced")],
     ])
 
 

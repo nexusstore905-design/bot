@@ -70,6 +70,7 @@ def _order_step(context: ContextTypes.DEFAULT_TYPE, step: int, title: str, promp
 async def cb_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
+    await update.callback_query.answer()
 
     if "cart" not in context.user_data:
         context.user_data["cart"] = []
@@ -98,6 +99,7 @@ async def cb_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_select_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
+    await update.callback_query.answer()
     category = update.callback_query.data.split(":", 1)[1]
     context.user_data["temp_cat"] = category
 
@@ -120,6 +122,7 @@ async def cb_select_category(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def cb_select_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
+    await update.callback_query.answer()
     product_id = int(update.callback_query.data.split(":", 1)[1])
 
     async with AsyncSessionLocal() as session:
@@ -155,6 +158,7 @@ async def cb_select_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
+    await update.callback_query.answer()
     qty = int(update.callback_query.data.split(":", 1)[1])
 
     item = context.user_data.pop("temp_item")
@@ -175,6 +179,7 @@ async def cb_select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def cb_back_to_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
+    await update.callback_query.answer()
     category = context.user_data.get("temp_cat")
     if not category:
         async with AsyncSessionLocal() as session:
@@ -215,6 +220,7 @@ async def cb_back_to_products(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def cb_cart_adjust(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
+    await update.callback_query.answer()
 
     parts = update.callback_query.data.split(":")
     action, index = parts[0], int(parts[1])
@@ -260,6 +266,7 @@ async def cb_cart_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_cart_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
+    await update.callback_query.answer()
     context.user_data["cart"] = []
     context.user_data.pop("player_id", None)
     context.user_data.pop("temp_item", None)
@@ -274,6 +281,7 @@ async def cb_cart_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_cart_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
+    await update.callback_query.answer()
 
     if not context.user_data.get("cart"):
         await update.callback_query.edit_message_text(
@@ -287,9 +295,8 @@ async def cb_cart_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _order_step(
             context,
             4,
-            "Enter your PUBG Player ID",
-            "Check the ID carefully before submitting.\n"
-            "<i>It must contain 5–15 digits and start with 5.</i>",
+            "Enter your Game Player ID",
+            "Check the ID carefully before submitting.",
         ),
         parse_mode="HTML",
     )
@@ -313,10 +320,10 @@ async def msg_enter_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ConversationHandler.END
 
     player_id = update.message.text.strip()
-    if not player_id.isdigit() or not (5 <= len(player_id) <= 15) or not player_id.startswith("5"):
+    if len(player_id) < 3 or len(player_id) > 20:
         await update.message.reply_text(
             "❌ <b>That Player ID does not look right.</b>\n\n"
-            "Enter 5–15 digits starting with 5. Please try again:",
+            "Enter a valid Game ID (3-20 characters). Please try again:",
             parse_mode="HTML",
         )
         return ORDER_ENTER_PLAYER_ID
@@ -338,6 +345,7 @@ async def msg_enter_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
+    await update.callback_query.answer()
     user = update.effective_user
     cart = context.user_data.get("cart", [])
     player_id = context.user_data.get("player_id")
@@ -512,12 +520,13 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_edit_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
+    await update.callback_query.answer()
     await update.callback_query.edit_message_text(
         _order_step(
             context,
             4,
-            "Enter your PUBG Player ID",
-            "Send the correct ID below. It must contain 5–15 digits and start with 5.",
+            "Enter your Game Player ID",
+            "Send the correct ID below.",
         ),
         parse_mode="HTML",
     )
@@ -528,6 +537,7 @@ async def cb_reset_order_products(update: Update, context: ContextTypes.DEFAULT_
     """Clear the current product selection and return to the product groups."""
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
+    await update.callback_query.answer()
     context.user_data["cart"] = []
     context.user_data.pop("player_id", None)
     context.user_data.pop("temp_item", None)

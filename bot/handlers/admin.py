@@ -17,6 +17,7 @@ from database.database import AsyncSessionLocal
 from database.repositories.user_repo import UserRepository, AccessCodeRepository
 from database.repositories.product_repo import ProductRepository
 from database.repositories.order_repo import OrderRepository
+from database.repositories.business_data_repo import BusinessDataRepository
 from database.repositories.api_store_repo import ApiStoreRepository, UserOrderLimitRepository
 from database.models import OrderStatus
 from bot.middlewares.auth_middleware import is_admin
@@ -26,7 +27,7 @@ from bot.keyboards.admin_kb import (
     cleanup_removed_products_kb, admin_customers_kb,
     admin_customer_detail_kb, admin_customer_orders_kb,
     admin_customer_unsettled_kb, confirm_customer_settlement_kb,
-    customer_date_result_kb, reset_all_products_kb,
+    customer_date_result_kb, reset_all_products_kb, reset_business_data_kb,
     admin_pin_kb, remove_products_kb, change_status_kb,
     api_stores_kb, store_actions_kb, user_limits_kb,
     create_code_options_kb,
@@ -94,6 +95,55 @@ async def cb_admin_advanced(update: Update, context: ContextTypes.DEFAULT_TYPE):
         panel("Advanced settings", "API stores, order limits, and service availability.", icon="⚙️"),
         reply_markup=admin_advanced_kb(),
         parse_mode="HTML",
+    )
+
+
+@_admin_guard
+async def cb_reset_business_data_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    async with AsyncSessionLocal() as session:
+        counts = await BusinessDataRepository(session).get_reset_counts()
+    await query.message.edit_text(
+        "🧨 <b>Reset customer and sales data?</b>\n──────────────\n\n"
+        f"Customers: <b>{counts['customers']}</b>\n"
+        f"Orders and payment records: <b>{counts['orders']}</b>\n"
+        f"Order lines and supplier history: <b>{counts['order_items'] + counts['order_status_history'] + counts['supplier_fulfillments']}</b>\n"
+        f"Access codes and API store keys: <b>{counts['access_codes'] + counts['api_stores']}</b>\n"
+        f"Customer order limits: <b>{counts['customer_limits']}</b>\n\n"
+        "This permanently deletes all customer accounts, every order and its payment status, order/supplier history, access codes, API store keys, and customer-specific limits.\n\n"
+        "Your product catalog, supplier routing, admin accounts, bot settings, and environment secrets will stay. You will need to create new access codes and API store keys afterward.",
+        parse_mode="HTML",
+        reply_markup=reset_business_data_kb(),
+    )
+
+
+@_admin_guard
+async def cb_reset_business_data_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Resetting customer and sales data…")
+    try:
+        async with AsyncSessionLocal() as session:
+            counts = await BusinessDataRepository(session).reset_business_data()
+    except Exception:
+        logger.exception("Admin business-data reset failed")
+        await query.message.edit_text(
+            "❌ <b>Reset failed.</b> The database transaction was rolled back. No reset was completed; check the bot logs and try again.",
+            parse_mode="HTML",
+            reply_markup=admin_advanced_kb(),
+        )
+        return
+
+    await query.message.edit_text(
+        "✅ <b>Business data reset completed.</b>\n\n"
+        f"Customers deleted: <b>{counts['customers']}</b>\n"
+        f"Orders and payment records deleted: <b>{counts['orders']}</b>\n"
+        f"Order lines/history deleted: <b>{counts['order_items'] + counts['order_status_history'] + counts['supplier_fulfillments']}</b>\n"
+        f"Access codes/API store keys deleted: <b>{counts['access_codes'] + counts['api_stores']}</b>\n"
+        f"Customer limits deleted: <b>{counts['customer_limits']}</b>\n\n"
+        "Products and bot configuration are still available. Create fresh access codes and API store keys before customers reconnect.",
+        parse_mode="HTML",
+        reply_markup=admin_advanced_kb(),
     )
 
 
@@ -578,22 +628,35 @@ async def cb_customer_settle_start(update: Update, context: ContextTypes.DEFAULT
 
 @_admin_guard
 async def cb_customer_settle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
+    query = update.callback_query
+    await query.answer("Saving payment status…")
     _, telegram_id_text, high_watermark_text = update.callback_query.data.split(":", 2)
     telegram_id, high_watermark = int(telegram_id_text), int(high_watermark_text)
     settled_at = datetime.now(timezone.utc)
 
-    async with AsyncSessionLocal() as session:
-        user = await UserRepository(session).get_by_telegram_id(telegram_id)
-        if user is None:
-            await update.callback_query.message.edit_text("Customer not found.")
-            return
-        changed_by = f"admin:{update.effective_user.full_name or update.effective_user.id}"
-        repo = OrderRepository(session)
-        settled_count = await repo.settle_unsettled_by_user(
-            user.id, settled_by, settled_at, high_watermark
+    try:
+        async with AsyncSessionLocal() as session:
+            user = await UserRepository(session).get_by_telegram_id(telegram_id)
+            if user is None:
+                await query.message.edit_text("Customer not found.")
+                return
+            settled_by = f"admin:{update.effective_user.full_name or update.effective_user.id}"
+            repo = OrderRepository(session)
+            settled_count = await repo.settle_unsettled_by_user(
+                user.id, settled_by, settled_at, high_watermark
+            )
+            unsettled_count = await repo.count_unsettled_by_user(user.id)
+    except Exception:
+        logger.exception(
+            "Failed to mark completed orders as paid for customer telegram_id=%s",
+            telegram_id,
         )
-        unsettled_count = await repo.count_unsettled_by_user(user.id)
+        await query.message.edit_text(
+            "❌ <b>Could not confirm the payment update.</b> Refresh the customer’s unsettled orders to see the saved status, then check the bot/database logs if the orders are still unsettled.",
+            parse_mode="HTML",
+            reply_markup=admin_customer_detail_kb(telegram_id),
+        )
+        return
 
     if settled_count:
         text = (
@@ -605,7 +668,7 @@ async def cb_customer_settle_confirm(update: Update, context: ContextTypes.DEFAU
             "ℹ️ <b>No orders were changed.</b>\n\n"
             "Another admin may already have cleared these orders. Newer completed recharges remain unsettled."
         )
-    await update.callback_query.message.edit_text(
+    await query.message.edit_text(
         text,
         parse_mode="HTML",
         reply_markup=admin_customer_detail_kb(telegram_id, unsettled_count),

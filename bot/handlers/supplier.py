@@ -176,16 +176,17 @@ async def _notify_admins(context: ContextTypes.DEFAULT_TYPE, result: dict) -> No
 
 
 async def handle_supplier_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Support the legacy DONE/ERROR text command in the global supplier chat."""
-    if not update.message or not update.message.text or update.message.chat.id != SUPPLIER_CHAT_ID:
+    """Support DONE/ERROR text command in any configured supplier group."""
+    if not update.message or not update.message.text:
         return
     parts = update.message.text.strip().upper().split()
     if len(parts) != 2 or parts[0] not in ("DONE", "ERROR"):
         return
     command, order_id = parts
+    chat_id = update.message.chat.id
     status = SupplierFulfillmentStatus.completed if command == "DONE" else SupplierFulfillmentStatus.failed
     changed_by = f"supplier:{update.effective_user.full_name or update.effective_user.id}"
-    result = await _process_supplier_action(order_id, None, status, changed_by, update.message.chat.id)
+    result = await _process_supplier_action(order_id, None, status, changed_by, chat_id)
     if not result["ok"]:
         await update.message.reply_text(result["message"], parse_mode="HTML")
         return
@@ -195,6 +196,7 @@ async def handle_supplier_message(update: Update, context: ContextTypes.DEFAULT_
     )
     await _notify_admins(context, result)
     await _notify_customer(context, result)
+
 
 
 async def cb_supplier_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -235,13 +237,13 @@ async def cb_supplier_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 def get_supplier_handlers() -> list:
-    handlers = [CallbackQueryHandler(cb_supplier_action, pattern=r"^sup_(done|err|error):")]
-    if SUPPLIER_CHAT_ID:
-        handlers.insert(
-            0,
-            MessageHandler(
-                filters.Chat(SUPPLIER_CHAT_ID) & filters.TEXT & ~filters.COMMAND,
-                handle_supplier_message,
-            ),
-        )
-    return handlers
+    return [
+        # Handle DONE/ERROR text commands from any group (validated by order lookup)
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_supplier_message,
+        ),
+        # Handle Done/Error inline buttons
+        CallbackQueryHandler(cb_supplier_action, pattern=r"^sup_(done|err|error):"),
+    ]
+
