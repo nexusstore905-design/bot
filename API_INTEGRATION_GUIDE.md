@@ -49,6 +49,8 @@ flask --app api.flask_app:app run --host 127.0.0.1 --port 5000
 
 The local base URL is then `http://127.0.0.1:5000`. To call from another machine on a private development network, bind to the appropriate interface and use that machine's address. The Flask development server is for development only. For a live store, configure a production WSGI host to load `api.flask_app:app` (the bot admin panel currently points to the PythonAnywhere Web tab), use HTTPS, and ensure the API service and bot share the intended database.
 
+**Run the Telegram bot as a separate persistent process as well.** The 10-minute supplier timeout worker starts from `main.py`; the Flask WSGI app does not run that worker. On PythonAnywhere, configure an Always-on task using the project's virtual-environment Python and the full path to `main.py`. Both the web app and this bot task must use the same project files, `BOT_TOKEN`, and `DATABASE_URL`. Reloading only the Web app does not restart the timeout worker. On bot startup, its task log should show `Supplier expiry worker started`.
+
 Set environment variables in the API host's protected configuration. Do not put secrets in source control or in a public web page:
 
 ```text

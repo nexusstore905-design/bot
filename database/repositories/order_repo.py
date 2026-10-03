@@ -446,7 +446,7 @@ class OrderRepository:
 
     async def cancel_stale_pending(
         self, older_than: datetime,
-    ) -> list[tuple[str, int, OrderStatus, int | None, list[tuple[int, int]]]]:
+    ) -> list[tuple[str, int, OrderStatus, int | None, list[tuple[int, int | None]]]]:
         """Expire unclaimed supplier work and return order/customer/message details."""
         result = await self.session.execute(
             select(Order)
@@ -461,7 +461,7 @@ class OrderRepository:
             return []
 
         expired_orders: list[
-            tuple[str, int, OrderStatus, int | None, list[tuple[int, int]]]
+            tuple[str, int, OrderStatus, int | None, list[tuple[int, int | None]]]
         ] = []
         updated_at = utcnow()
         for order in candidates:
@@ -500,7 +500,10 @@ class OrderRepository:
                 supplier_messages = [
                     (fulfillment.supplier_chat_id, fulfillment.supplier_msg_id)
                     for fulfillment in open_fulfillments
-                    if fulfillment.supplier_msg_id is not None
+                    if fulfillment.status in (
+                        SupplierFulfillmentStatus.sending,
+                        SupplierFulfillmentStatus.pending,
+                    )
                 ]
                 expired_fulfillment_ids: list[int] = []
                 for fulfillment in open_fulfillments:

@@ -36,22 +36,38 @@ async def cancel_expired_pending_orders(bot) -> int:
         )
         supplier_text = (
             "⏱️ <b>ORDER CANCELLED — SUPPLIER TIMEOUT</b>\n\n"
-            f"Order <code>{html.escape(order_id)}</code> was closed because no supplier action was received within 10 minutes."
+            f"Order <code>{html.escape(order_id)}</code> was closed because no supplier action was received within 10 minutes.\n"
+            "Please do not process this order."
         )
+        notified_supplier_chats = set()
         for supplier_chat_id, message_id in supplier_messages:
-            try:
-                await bot.edit_message_text(
-                    chat_id=supplier_chat_id,
-                    message_id=message_id,
-                    text=supplier_text,
-                    parse_mode="HTML",
-                    reply_markup=None,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Could not close supplier message for timed-out order %s (%s)",
-                    order_id, type(exc).__name__,
-                )
+            if message_id is not None:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=supplier_chat_id,
+                        message_id=message_id,
+                        text=supplier_text,
+                        parse_mode="HTML",
+                        reply_markup=None,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not close supplier message for timed-out order %s (%s)",
+                        order_id, type(exc).__name__,
+                    )
+            if supplier_chat_id not in notified_supplier_chats:
+                try:
+                    await bot.send_message(
+                        chat_id=supplier_chat_id,
+                        text=supplier_text,
+                        parse_mode="HTML",
+                    )
+                    notified_supplier_chats.add(supplier_chat_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Could not send supplier timeout notice for order %s to %s (%s)",
+                        order_id, supplier_chat_id, type(exc).__name__,
+                    )
 
         if customer_msg_id is not None:
             try:
