@@ -55,7 +55,7 @@ async def main():
         "global" if SUPPLIER_CHAT_ID else "no global",
         "; package destinations override it" if SUPPLIER_CHAT_ID else "; package destinations are used when set",
     )
-    logger.info("Unanswered supplier work expires after 10 minutes; checking every 60 seconds.")
+    logger.info("Unanswered supplier work expires after 10 minutes; checking every 15 seconds.")
 
     # 2. Build bot app with Rate Limiting (Outbound DDoS protection)
     from telegram.ext import AIORateLimiter

@@ -444,8 +444,10 @@ class OrderRepository:
         await self.session.commit()
         return True
 
-    async def cancel_stale_pending(self, older_than: datetime) -> list[tuple[str, int, OrderStatus]]:
-        """Expire unclaimed supplier work and return order, customer, and final status."""
+    async def cancel_stale_pending(
+        self, older_than: datetime,
+    ) -> list[tuple[str, int, OrderStatus, int | None, list[tuple[int, int]]]]:
+        """Expire unclaimed supplier work and return order/customer/message details."""
         result = await self.session.execute(
             select(Order)
             .where(
@@ -458,7 +460,9 @@ class OrderRepository:
         if not candidates:
             return []
 
-        expired_orders: list[tuple[str, int, OrderStatus]] = []
+        expired_orders: list[
+            tuple[str, int, OrderStatus, int | None, list[tuple[int, int]]]
+        ] = []
         updated_at = utcnow()
         for order in candidates:
             fulfillments = list(order.fulfillments)
@@ -493,6 +497,11 @@ class OrderRepository:
                 if not timed_out:
                     continue
 
+                supplier_messages = [
+                    (fulfillment.supplier_chat_id, fulfillment.supplier_msg_id)
+                    for fulfillment in open_fulfillments
+                    if fulfillment.supplier_msg_id is not None
+                ]
                 expired_fulfillment_ids: list[int] = []
                 for fulfillment in open_fulfillments:
                     timeout_result = await self.session.execute(
@@ -532,7 +541,13 @@ class OrderRepository:
                             changed_by="auto_cancel",
                             note="Supplier work expired after 10 minutes without a response.",
                         ))
-                        expired_orders.append((order.order_id, order.user.telegram_id, final_status))
+                        expired_orders.append((
+                            order.order_id,
+                            order.user.telegram_id,
+                            final_status,
+                            order.customer_msg_id,
+                            supplier_messages,
+                        ))
                         break
                 # Persist child expiry even if a concurrent supplier action changed
                 # the parent order while this worker was running.
@@ -560,7 +575,13 @@ class OrderRepository:
                 changed_by="auto_cancel",
                 note="Automatically cancelled after 10 minutes without supplier action.",
             ))
-            expired_orders.append((order.order_id, order.user.telegram_id, OrderStatus.cancelled))
+            expired_orders.append((
+                order.order_id,
+                order.user.telegram_id,
+                OrderStatus.cancelled,
+                order.customer_msg_id,
+                [],
+            ))
 
         if expired_orders:
             await self.session.commit()
@@ -569,6 +590,15 @@ class OrderRepository:
     async def set_supplier_msg(self, order: Order, msg_id: int) -> None:
         order.supplier_msg_id = msg_id
         await self.session.commit()
+
+    async def set_customer_msg(self, order_id: str, msg_id: int) -> bool:
+        result = await self.session.execute(
+            update(Order)
+            .where(Order.order_id == order_id)
+            .values(customer_msg_id=msg_id)
+        )
+        await self.session.commit()
+        return result.rowcount == 1
 
     async def count_by_status(self) -> dict[str, int]:
         result = {}

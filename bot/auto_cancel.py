@@ -10,6 +10,7 @@ from database.database import AsyncSessionLocal
 from database.repositories.order_repo import OrderRepository
 from database.models import OrderStatus
 from config.settings import ADMIN_IDS
+from bot.keyboards.customer_kb import order_status_kb
 from utils.helpers import utcnow
 
 logger = logging.getLogger(__name__)
@@ -23,8 +24,50 @@ async def cancel_expired_pending_orders(bot) -> int:
     async with AsyncSessionLocal() as session:
         expired = await OrderRepository(session).cancel_stale_pending(cutoff)
 
-    for order_id, customer_id, status in expired:
+    for order_id, customer_id, status, customer_msg_id, supplier_messages in expired:
         cancelled = status == OrderStatus.cancelled
+        customer_text = (
+            "⏱️ <b>ORDER AUTO-CANCELLED</b>\n\n"
+            f"Order <code>{html.escape(order_id)}</code> was automatically cancelled because the supplier did not choose Done or Error within 10 minutes.\n\n"
+            "If you have already paid, contact support about your payment."
+            if cancelled else
+            "⚠️ <b>ORDER NEEDS SUPPORT</b>\n\n"
+            f"Order <code>{html.escape(order_id)}</code> could not be completed because a supplier did not choose Done or Error within 10 minutes. Please contact support."
+        )
+        supplier_text = (
+            "⏱️ <b>ORDER CANCELLED — SUPPLIER TIMEOUT</b>\n\n"
+            f"Order <code>{html.escape(order_id)}</code> was closed because no supplier action was received within 10 minutes."
+        )
+        for supplier_chat_id, message_id in supplier_messages:
+            try:
+                await bot.edit_message_text(
+                    chat_id=supplier_chat_id,
+                    message_id=message_id,
+                    text=supplier_text,
+                    parse_mode="HTML",
+                    reply_markup=None,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not close supplier message for timed-out order %s (%s)",
+                    order_id, type(exc).__name__,
+                )
+
+        if customer_msg_id is not None:
+            try:
+                await bot.edit_message_text(
+                    chat_id=customer_id,
+                    message_id=customer_msg_id,
+                    text=customer_text,
+                    parse_mode="HTML",
+                    reply_markup=order_status_kb(order_id),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not update customer order card for %s (%s)",
+                    order_id, type(exc).__name__,
+                )
+
         admin_text = (
             "⏱️ <b>SUPPLIER RESPONSE TIMED OUT</b>\n\n"
             f"Order: <code>{html.escape(order_id)}</code>\n"
@@ -42,20 +85,13 @@ async def cancel_expired_pending_orders(bot) -> int:
         try:
             await bot.send_message(
                 chat_id=customer_id,
-                text=(
-                    ("⏱️  <b>ORDER AUTO-CANCELLED</b>\n\n" if cancelled else "⚠️  <b>ORDER NEEDS SUPPORT</b>\n\n")
-                    + f"Order <code>{html.escape(order_id)}</code> "
-                    + (
-                        "was automatically cancelled because the supplier did not choose Done or Error within 10 minutes. "
-                        "If you have already paid, contact support about your payment. "
-                        if cancelled else
-                        "could not be completed because a supplier did not choose Done or Error within 10 minutes. "
-                        "Please contact support about this order. "
-                    )
-                    + "You can start a new order when ready."
-                ),
+                text=customer_text + "\n\nYou can start a new order when ready.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "🔄  View updated order status",
+                        callback_data=f"refresh_order:{order_id}:0",
+                    )],
                     [InlineKeyboardButton("🛍  Start a new order", callback_data="order_start")],
                     [InlineKeyboardButton("📋  My orders", callback_data="my_orders")],
                 ]),

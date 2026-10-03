@@ -92,6 +92,10 @@ async def init_db() -> None:
             await conn.execute(text(
                 "ALTER TABLE orders ADD COLUMN settled_by VARCHAR(128)"
             ))
+        if "customer_msg_id" not in columns:
+            await conn.execute(text(
+                "ALTER TABLE orders ADD COLUMN customer_msg_id BIGINT"
+            ))
         await conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_orders_settled_at ON orders (settled_at)"
         ))

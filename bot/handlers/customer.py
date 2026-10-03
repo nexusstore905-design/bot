@@ -38,6 +38,17 @@ STATUS_DISPLAY = {
 }
 
 
+async def _remember_customer_order_message(order_id: str, message_id: int) -> None:
+    try:
+        async with AsyncSessionLocal() as session:
+            await OrderRepository(session).set_customer_msg(order_id, message_id)
+    except Exception as exc:
+        logger.warning(
+            "Could not save customer order message for %s (%s)",
+            order_id, type(exc).__name__,
+        )
+
+
 def _render_cart(cart: list) -> str:
     lines = []
     for i, item in enumerate(cart, 1):
@@ -491,6 +502,9 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=order_status_kb(order_id),
         parse_mode="HTML",
     )
+    await _remember_customer_order_message(
+        order_id, update.callback_query.message.message_id,
+    )
 
     return ConversationHandler.END
 
@@ -751,6 +765,9 @@ async def cb_view_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.edit_message_text(
         text, parse_mode="HTML", reply_markup=order_status_kb(order_id, page)
     )
+    await _remember_customer_order_message(
+        order_id, update.callback_query.message.message_id,
+    )
 
 
 async def cb_refresh_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -789,6 +806,9 @@ async def cb_refresh_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎮 <b>Player ID</b>  <code>{html.escape(order.player_id, quote=False)}</code>",
         reply_markup=order_status_kb(order_id, page),
         parse_mode="HTML",
+    )
+    await _remember_customer_order_message(
+        order_id, update.callback_query.message.message_id,
     )
 
 

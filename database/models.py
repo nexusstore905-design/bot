@@ -117,6 +117,7 @@ class Order(Base):
     )
     player_id: Mapped[str] = mapped_column(String(64), nullable=False)
     supplier_msg_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    customer_msg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     settled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     settled_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
