@@ -447,7 +447,7 @@ class OrderRepository:
     async def cancel_stale_pending(
         self, older_than: datetime,
     ) -> list[tuple[str, int, OrderStatus, int | None, list[tuple[int, int | None]]]]:
-        """Expire unclaimed supplier work and return order/customer/message details."""
+        """Cancel orders still pending/processing after the timeout and return info for notifications."""
         result = await self.session.execute(
             select(Order)
             .where(
@@ -464,131 +464,61 @@ class OrderRepository:
             tuple[str, int, OrderStatus, int | None, list[tuple[int, int | None]]]
         ] = []
         updated_at = utcnow()
+
         for order in candidates:
-            fulfillments = list(order.fulfillments)
-            if fulfillments:
+            # Collect any supplier messages that were sent
+            supplier_messages: list[tuple[int, int | None]] = [
+                (f.supplier_chat_id, f.supplier_msg_id)
+                for f in order.fulfillments
+            ]
+
+            # Cancel all open fulfillments
+            for f in order.fulfillments:
                 open_statuses = (
                     SupplierFulfillmentStatus.queued,
                     SupplierFulfillmentStatus.sending,
                     SupplierFulfillmentStatus.pending,
                 )
-                open_fulfillments = [f for f in fulfillments if f.status in open_statuses]
-                if not open_fulfillments:
-                    continue
-
-                # Start the supplier's response timer from the last state change
-                # made when its Telegram task was sent, not from order creation.
-                # A queued task still uses order age as a fallback in case it
-                # never made it to Telegram.
-                timed_out = any(
-                    (
-                        fulfillment.status in (
-                            SupplierFulfillmentStatus.sending,
-                            SupplierFulfillmentStatus.pending,
-                        )
-                        and _as_utc_aware(fulfillment.updated_at) <= _as_utc_aware(older_than)
-                    )
-                    or (
-                        fulfillment.status == SupplierFulfillmentStatus.queued
-                        and _as_utc_aware(order.created_at) <= _as_utc_aware(older_than)
-                    )
-                    for fulfillment in open_fulfillments
-                )
-                if not timed_out:
-                    continue
-
-                supplier_messages = [
-                    (fulfillment.supplier_chat_id, fulfillment.supplier_msg_id)
-                    for fulfillment in open_fulfillments
-                    if fulfillment.status in (
-                        SupplierFulfillmentStatus.sending,
-                        SupplierFulfillmentStatus.pending,
-                    )
-                ]
-                expired_fulfillment_ids: list[int] = []
-                for fulfillment in open_fulfillments:
-                    timeout_result = await self.session.execute(
+                if f.status in open_statuses:
+                    await self.session.execute(
                         update(SupplierFulfillment)
-                        .where(
-                            SupplierFulfillment.id == fulfillment.id,
-                            SupplierFulfillment.status.in_(open_statuses),
-                        )
+                        .where(SupplierFulfillment.id == f.id)
                         .values(
                             status=SupplierFulfillmentStatus.failed,
                             failure_note="Supplier did not respond within 10 minutes.",
                             updated_at=updated_at,
                         )
                     )
-                    if timeout_result.rowcount == 1:
-                        expired_fulfillment_ids.append(fulfillment.id)
-                if not expired_fulfillment_ids:
-                    continue
-                # One supplier timeout cancels the full customer order. Any
-                # sibling supplier tasks still waiting are also closed below.
-                final_status = OrderStatus.cancelled
-                for _ in range(3):
-                    await self.session.refresh(order)
-                    old_status = order.status
-                    if old_status not in (OrderStatus.pending, OrderStatus.processing):
-                        break
-                    order_update = await self.session.execute(
-                        update(Order)
-                        .where(Order.id == order.id, Order.status == old_status)
-                        .values(status=final_status, updated_at=updated_at)
-                    )
-                    if order_update.rowcount == 1:
-                        self.session.add(OrderStatusHistory(
-                            order_id=order.id,
-                            old_status=old_status.value,
-                            new_status=final_status.value,
-                            changed_by="auto_cancel",
-                            note="Supplier work expired after 10 minutes without a response.",
-                        ))
-                        expired_orders.append((
-                            order.order_id,
-                            order.user.telegram_id,
-                            final_status,
-                            order.customer_msg_id,
-                            supplier_messages,
-                        ))
-                        break
-                # Persist child expiry even if a concurrent supplier action changed
-                # the parent order while this worker was running.
-                await self.session.commit()
-                continue
 
-            if order.status != OrderStatus.pending:
-                continue
-            update_result = await self.session.execute(
+            # Cancel the order itself
+            order_update = await self.session.execute(
                 update(Order)
                 .where(
                     Order.id == order.id,
-                    Order.status == OrderStatus.pending,
-                    Order.created_at <= older_than,
+                    Order.status.in_((OrderStatus.pending, OrderStatus.processing)),
                 )
                 .values(status=OrderStatus.cancelled, updated_at=updated_at)
             )
-            if update_result.rowcount != 1:
-                continue
-
-            self.session.add(OrderStatusHistory(
-                order_id=order.id,
-                old_status=OrderStatus.pending.value,
-                new_status=OrderStatus.cancelled.value,
-                changed_by="auto_cancel",
-                note="Automatically cancelled after 10 minutes without supplier action.",
-            ))
-            expired_orders.append((
-                order.order_id,
-                order.user.telegram_id,
-                OrderStatus.cancelled,
-                order.customer_msg_id,
-                [],
-            ))
+            if order_update.rowcount == 1:
+                self.session.add(OrderStatusHistory(
+                    order_id=order.id,
+                    old_status=order.status.value,
+                    new_status=OrderStatus.cancelled.value,
+                    changed_by="auto_cancel",
+                    note="Automatically cancelled after 10 minutes without supplier action.",
+                ))
+                expired_orders.append((
+                    order.order_id,
+                    order.user.telegram_id,
+                    OrderStatus.cancelled,
+                    order.customer_msg_id,
+                    supplier_messages,
+                ))
 
         if expired_orders:
             await self.session.commit()
         return expired_orders
+
 
     async def set_supplier_msg(self, order: Order, msg_id: int) -> None:
         order.supplier_msg_id = msg_id

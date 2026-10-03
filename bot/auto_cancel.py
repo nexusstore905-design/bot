@@ -28,11 +28,9 @@ async def cancel_expired_pending_orders(bot) -> int:
         cancelled = status == OrderStatus.cancelled
         customer_text = (
             "⏱️ <b>ORDER AUTO-CANCELLED</b>\n\n"
-            f"Order <code>{html.escape(order_id)}</code> was automatically cancelled because the supplier did not choose Done or Error within 10 minutes.\n\n"
-            "If you have already paid, contact support about your payment."
-            if cancelled else
-            "⚠️ <b>ORDER NEEDS SUPPORT</b>\n\n"
-            f"Order <code>{html.escape(order_id)}</code> could not be completed because a supplier did not choose Done or Error within 10 minutes. Please contact support."
+            f"Order <code>{html.escape(order_id)}</code> was automatically cancelled "
+            "because the supplier did not respond within 10 minutes.\n\n"
+            "Please place a new order or contact support."
         )
         supplier_text = (
             "⏱️ <b>ORDER CANCELLED — SUPPLIER TIMEOUT</b>\n\n"
