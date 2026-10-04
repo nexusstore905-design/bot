@@ -79,7 +79,13 @@ def authenticate_request():
             store_repo = ApiStoreRepository(session)
             store = await store_repo.get_by_api_key(api_key)
             if not store:
-                return False, ("Invalid API Key", 401), None
+                # DEBUG HINT FOR USER
+                all_stores = await store_repo.get_all()
+                if not all_stores:
+                    return False, ("Invalid API Key (Debug: The database has ZERO api keys. You must create one in the bot.)", 401), None
+                
+                hint = all_stores[0].api_key[:10] + "..."
+                return False, (f"Invalid API Key (Debug: The key provided does not match any in the DB. Example of a valid key in DB starts with: {hint})", 401), None
             if not store.is_active:
                 return False, (f"API store '{store.name}' is disabled by admin", 403), None
             return True, None, store.id
