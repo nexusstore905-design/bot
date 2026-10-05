@@ -108,8 +108,8 @@ def create_order():
     if not telegram_user_id or not product_id or not player_id:
         return jsonify({"detail": "telegram_user_id, product_id, and player_id are required"}), 400
         
-    if not (player_id.startswith("5") and player_id.isdigit() and 5 <= len(player_id) <= 16):
-        return jsonify({"detail": "Invalid player_id. Must start with 5 and be numeric"}), 400
+    if len(player_id) < 3 or len(player_id) > 20:
+        return jsonify({"detail": "Invalid player_id. Must be 3-20 characters long"}), 400
     try:
         telegram_user_id = int(telegram_user_id)
         product_id = int(product_id)
