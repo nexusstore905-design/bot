@@ -96,6 +96,16 @@ async def init_db() -> None:
             await conn.execute(text(
                 "ALTER TABLE orders ADD COLUMN customer_msg_id BIGINT"
             ))
+            
+        prod_columns = await conn.run_sync(
+            lambda sync_conn: {
+                column["name"] for column in inspect(sync_conn).get_columns("products")
+            }
+        )
+        if "supplier_chat_id" not in prod_columns:
+            await conn.execute(text(
+                "ALTER TABLE products ADD COLUMN supplier_chat_id BIGINT"
+            ))
         await conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_orders_settled_at ON orders (settled_at)"
         ))
