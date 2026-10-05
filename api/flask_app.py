@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 
+@app.errorhandler(500)
+def internal_error(e):
+    import traceback
+    traceback.print_exc()
+    return jsonify({"detail": f"Internal server error: {str(e.original_exception if hasattr(e, 'original_exception') else e)}"}), 500
+    
 @app.after_request
 def add_cors_headers(response):
     origin = request.headers.get("Origin")
