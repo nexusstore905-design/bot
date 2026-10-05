@@ -22,7 +22,7 @@ You will need:
 
 ### Create an API store and key
 
-In the bot, open **Admin → API settings → API stores → Add Store**. Give the connected platform a name and save the generated key immediately; the full key is shown only when the store is created. The API store can be disabled and its daily order limit can be changed from the admin controls.
+In the bot, open **Admin → Advanced settings → API stores → Add Store**. Give the connected platform a name and save the generated key immediately; the full key is shown only when the store is created. The API store can be disabled and its daily order limit can be changed from the admin controls.
 
 Use a separate per-store key for each connected platform. A key created for one API store can only check orders created through that store. The optional master `API_KEY` can access orders across stores, so keep it for trusted server-side administration and do not distribute it to a storefront.
 
@@ -39,7 +39,7 @@ The sample IDs above are illustrative; confirm the actual IDs in your bot before
 
 ## 3. Run and expose the API
 
-The Flask application object is `app` in `api/flask_app.py`. The API process must have the same `BOT_TOKEN` and `DATABASE_URL` configuration as the bot. If `DATABASE_URL` is omitted, the project defaults to its local SQLite database; separate machines or containers must not accidentally use separate default database files.
+The Flask application object is `app` in `api/flask_app.py`. The API process must have the same `BOT_TOKEN` and `DATABASE_URL` configuration as the bot. If `DATABASE_URL` is omitted, the project defaults to its local SQLite database; separate machines or containers must not accidentally use separate default database files. Relative SQLite URLs such as `sqlite+aiosqlite:///./nexus_bot.db` are resolved from the project directory so a WSGI process and the bot task do not silently create different databases because they started in different working directories. If the app and bot run from separate project copies, configure both to use the same absolute database path or shared database service.
 
 For local development from the project directory:
 

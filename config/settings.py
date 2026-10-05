@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+from sqlalchemy.engine import make_url
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 env_path = os.path.join(BASE_DIR, '.env')
@@ -29,7 +30,22 @@ BINANCE_ID: str = os.getenv("BINANCE_ID", "")
 MAX_PIN_ATTEMPTS: int = int(os.getenv("MAX_PIN_ATTEMPTS", "5"))
 LOCKOUT_MINUTES: int = int(os.getenv("LOCKOUT_MINUTES", "30"))
 SESSION_HOURS: int = int(os.getenv("SESSION_HOURS", "0"))
-DATABASE_URL: str = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{os.path.join(BASE_DIR, 'nexus_bot.db')}")
+DATABASE_URL: str = os.getenv(
+    "DATABASE_URL",
+    f"sqlite+aiosqlite:///{os.path.join(BASE_DIR, 'nexus_bot.db')}",
+).strip()
+
+# A relative SQLite URL otherwise resolves against the process working directory.
+# WSGI and the bot's always-on task can start in different directories, silently
+# giving each process a different database. Anchor relative SQLite paths here.
+if DATABASE_URL.startswith("sqlite"):
+    parsed_database_url = make_url(DATABASE_URL)
+    database_path = parsed_database_url.database
+    if database_path and database_path != ":memory:" and not os.path.isabs(database_path):
+        absolute_database_path = os.path.abspath(os.path.join(BASE_DIR, database_path))
+        DATABASE_URL = parsed_database_url.set(
+            database=absolute_database_path
+        ).render_as_string(hide_password=False)
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
 # REST API
