@@ -1,47 +1,148 @@
-import json
-import html
-import secrets
+"""REST API for connected stores.
+
+PythonAnywhere runs this under WSGI without threads, so each request does all
+of its async work (database and Telegram) inside a single event loop run.
+"""
 import asyncio
 import logging
-from flask import Flask, request, jsonify
-from sqlalchemy import text
+import secrets
+import uuid
+from datetime import timedelta
 
-from config.settings import API_KEY, API_CORS_ORIGINS, BOT_TOKEN
-from utils.supplier_routing import resolve_supplier_chat
-from database.database import AsyncSessionLocal
+from flask import Flask, jsonify, request
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
+from telegram import Bot
+from telegram.request import HTTPXRequest
+from werkzeug.exceptions import HTTPException
+
+from config.settings import API_CORS_ORIGINS, API_KEY, BOT_TOKEN, CURRENCY
+from database.database import AsyncSessionLocal, init_db
+from database.models import AuthStatus, SupplierFulfillmentStatus
+from database.repositories.api_store_repo import ApiStoreRepository, UserOrderLimitRepository
 from database.repositories.order_repo import OrderRepository
 from database.repositories.product_repo import ProductRepository
 from database.repositories.user_repo import UserRepository
-from database.repositories.api_store_repo import ApiStoreRepository, UserOrderLimitRepository
+from services import app_settings
+from services.dispatch import dispatch_order
+from utils.helpers import utcnow
+from utils.supplier_routing import resolve_supplier_chat
 
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+app.json.sort_keys = False
+
+BOT_HEARTBEAT_STALE = timedelta(minutes=2)
+MAX_IDEMPOTENCY_KEY_LENGTH = 64
 
 
-@app.errorhandler(500)
-def internal_error(e):
-    import traceback
-    traceback.print_exc()
-    return jsonify({"detail": f"Internal server error: {str(e.original_exception if hasattr(e, 'original_exception') else e)}"}), 500
-    
+def run_async(coro):
+    return asyncio.run(coro)
+
+
+def make_bot() -> tuple[Bot, HTTPXRequest]:
+    """A short-lived Bot for one request. Tests replace this."""
+    request_client = HTTPXRequest(connection_pool_size=4)
+    return Bot(BOT_TOKEN, request=request_client), request_client
+
+
+# Apply schema migrations when a worker starts, so the API never depends on the
+# bot task having been restarted after a deploy.
+try:
+    run_async(init_db())
+except Exception:
+    logger.exception("Database initialization failed in the API worker")
+
+
+class ApiError(Exception):
+    def __init__(self, status: int, detail: str):
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+
+
+@app.errorhandler(ApiError)
+def api_error(exc: ApiError):
+    return jsonify({"detail": exc.detail}), exc.status
+
+
+@app.errorhandler(HTTPException)
+def http_error(exc: HTTPException):
+    return jsonify({"detail": exc.description}), exc.code
+
+
+@app.errorhandler(Exception)
+def unhandled_error(exc: Exception):
+    error_id = uuid.uuid4().hex[:12]
+    logger.exception("Unhandled API error %s", error_id)
+    return jsonify({"detail": "Internal server error", "error_id": error_id}), 500
+
+
 @app.after_request
 def add_cors_headers(response):
     origin = request.headers.get("Origin")
-    allow_all = "*" in API_CORS_ORIGINS
-    if origin and (allow_all or origin in API_CORS_ORIGINS or origin == "null"):
+    # "null" (file:// pages, sandboxed frames) is allowed only if listed explicitly.
+    if origin and ("*" in API_CORS_ORIGINS or origin in API_CORS_ORIGINS):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key"
-        vary_values = [value.strip() for value in response.headers.get("Vary", "").split(",") if value.strip()]
-        if "Origin" not in vary_values:
-            vary_values.append("Origin")
-        response.headers["Vary"] = ", ".join(vary_values)
-    elif allow_all:
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key, Idempotency-Key"
+        response.headers["Access-Control-Max-Age"] = "600"
+        response.vary.add("Origin")
     return response
+
+
+async def _authenticate(session, api_key: str) -> int | None:
+    """Return the store ID for a store key, None for the master key, or raise."""
+    if not api_key:
+        raise ApiError(401, "Missing X-API-Key header")
+    if API_KEY and secrets.compare_digest(api_key, API_KEY):
+        return None
+    store = await ApiStoreRepository(session).get_by_api_key(api_key)
+    if store is None:
+        raise ApiError(401, "Invalid API key")
+    if not store.is_active:
+        raise ApiError(403, f"API store '{store.name}' is disabled by admin")
+    return store.id
+
+
+def _api_key() -> str:
+    return request.headers.get("X-API-Key", "").strip()
+
+
+def _delivery_state(order) -> tuple[bool, str]:
+    """(supplier_notified, delivery) for an order's supplier parts."""
+    parts = order.fulfillments
+    if not parts:
+        return False, "none"
+    if all(part.dispatched_at is not None for part in parts):
+        return True, "sent"
+    if any(part.status in (SupplierFulfillmentStatus.queued, SupplierFulfillmentStatus.sending) for part in parts):
+        return False, "retrying"
+    return False, "failed"
+
+
+def _order_payload(order) -> dict:
+    notified, delivery = _delivery_state(order)
+    item = order.items[0] if order.items else None
+    return {
+        "order_id": order.order_id,
+        "status": order.status.value,
+        "product_id": item.product_id if item else None,
+        "product_name": item.product_name if item else None,
+        "quantity": item.quantity if item else None,
+        "unit_price": item.unit_price if item else None,
+        "currency": CURRENCY,
+        "player_id": order.player_id,
+        "created_at": order.created_at.isoformat(),
+        "updated_at": order.updated_at.isoformat() if order.updated_at else None,
+        "supplier_notified": notified,
+        "delivery": delivery,
+    }
+
+
+def _valid_player_id(value: str) -> bool:
+    return 3 <= len(value) <= 20 and value.isprintable() and not any(ch.isspace() for ch in value)
 
 
 @app.route("/", methods=["GET"])
@@ -50,289 +151,195 @@ def index():
         "status": "online",
         "service": "Nexus Store API",
         "endpoints": {
-            "POST /orders/": "Place order",
-            "GET /orders/<order_id>": "Check status"
-        }
+            "GET /products/": "List active products",
+            "POST /orders/": "Place order (send Idempotency-Key to make retries safe)",
+            "GET /orders/<order_id>": "Check status",
+            "GET /health": "Database and bot status",
+        },
     })
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Check that the Flask API can reach its database."""
-    async def _check_database():
+    async def _check():
         async with AsyncSessionLocal() as session:
             await session.execute(text("SELECT 1"))
+        return await app_settings.last_heartbeat()
 
     try:
-        run_async(_check_database())
+        heartbeat = run_async(_check())
     except Exception as exc:
         logger.error("Flask API health check failed (%s)", type(exc).__name__)
         return jsonify({"status": "error", "database": "unavailable"}), 503
-    return jsonify({"status": "ok", "database": "ok"}), 200
+
+    if heartbeat is None:
+        bot_state = "unknown"
+    elif utcnow() - heartbeat <= BOT_HEARTBEAT_STALE:
+        bot_state = "ok"
+    else:
+        bot_state = "stale"
+    payload = {
+        "status": "ok" if bot_state == "ok" else "degraded",
+        "database": "ok",
+        "bot": bot_state,
+        "bot_last_seen": heartbeat.isoformat() if heartbeat else None,
+    }
+    strict = request.args.get("require_bot") in ("1", "true", "yes")
+    return jsonify(payload), 503 if strict and bot_state != "ok" else 200
 
 
-def run_async(coro):
-    return asyncio.run(coro)
+@app.route("/products/", methods=["GET"])
+def list_products():
+    api_key = _api_key()
 
-
-def authenticate_request():
-    api_key = request.headers.get("X-API-Key", "").strip()
-    if not api_key:
-        return False, ("Missing X-API-Key header", 401), None
-    
-    # 1. Master key check
-    if API_KEY and secrets.compare_digest(api_key, API_KEY):
-        return True, None, None
-        
-    # 2. Per-store key check
-    async def _check_store():
+    async def _list():
         async with AsyncSessionLocal() as session:
-            store_repo = ApiStoreRepository(session)
-            store = await store_repo.get_by_api_key(api_key)
-            if not store:
-                return False, ("Invalid API key", 401), None
-            if not store.is_active:
-                return False, (f"API store '{store.name}' is disabled by admin", 403), None
-            return True, None, store.id
-            
-    return run_async(_check_store())
+            await _authenticate(session, api_key)
+            products = await ProductRepository(session).get_all_active()
+        show_prices = await app_settings.show_prices()
+        return [
+            {
+                "product_id": product.id,
+                "category": product.category,
+                "name": product.name,
+                "price": product.price if show_prices else None,
+                "currency": CURRENCY,
+            }
+            for product in products
+        ]
+
+    return jsonify({"products": run_async(_list())}), 200
 
 
 @app.route("/orders/", methods=["POST"])
 def create_order():
-    auth_ok, auth_err, api_store_id = authenticate_request()
-    if not auth_ok:
-        return jsonify({"detail": auth_err[0]}), auth_err[1]
-        
-    data = request.get_json(silent=True) or {}
+    api_key = _api_key()
+    data = request.get_json(silent=True)
     if not isinstance(data, dict):
-        return jsonify({"detail": "Request body must be a JSON object"}), 400
+        raise ApiError(400, "Request body must be a JSON object")
     telegram_user_id = data.get("telegram_user_id")
     product_id = data.get("product_id")
     player_id = str(data.get("player_id", "")).strip()
-    
     if not telegram_user_id or not product_id or not player_id:
-        return jsonify({"detail": "telegram_user_id, product_id, and player_id are required"}), 400
-        
-    if len(player_id) < 3 or len(player_id) > 20:
-        return jsonify({"detail": "Invalid player_id. Must be 3-20 characters long"}), 400
+        raise ApiError(400, "telegram_user_id, product_id, and player_id are required")
+    if not _valid_player_id(player_id):
+        raise ApiError(400, "Invalid player_id. Must be 3-20 characters with no spaces")
     try:
         telegram_user_id = int(telegram_user_id)
         product_id = int(product_id)
     except (TypeError, ValueError):
-        return jsonify({"detail": "telegram_user_id and product_id must be integers"}), 400
+        raise ApiError(400, "telegram_user_id and product_id must be integers")
+    idempotency_key = request.headers.get("Idempotency-Key", "").strip() or None
+    if idempotency_key and (
+        len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LENGTH
+        or not idempotency_key.isascii() or not idempotency_key.isprintable()
+    ):
+        raise ApiError(400, f"Idempotency-Key must be 1-{MAX_IDEMPOTENCY_KEY_LENGTH} printable ASCII characters")
+
+    async def _replay(store_id):
+        async with AsyncSessionLocal() as session:
+            existing = await OrderRepository(session).get_by_idempotency_key(store_id, idempotency_key)
+            if existing is None:
+                return None
+            existing = await OrderRepository(session).get_by_order_id(existing.order_id)
+        item = existing.items[0] if existing.items else None
+        if (
+            existing.user.telegram_id != telegram_user_id
+            or (item and item.product_id != product_id)
+            or existing.player_id != player_id
+        ):
+            raise ApiError(409, "Idempotency-Key was already used for a different order")
+        return {**_order_payload(existing), "idempotent_replay": True}
 
     async def _process():
         async with AsyncSessionLocal() as session:
-            # Verify user
-            user_repo = UserRepository(session)
-            user = await user_repo.get_by_telegram_id(int(telegram_user_id))
-            if not user:
-                return None, ("User not found. They must start the Telegram bot at least once.", 400)
-                
-            # Verify product
-            product_repo = ProductRepository(session)
-            product = await product_repo.get_by_id(int(product_id))
+            store_id = await _authenticate(session, api_key)
+        if idempotency_key:
+            replay = await _replay(store_id)
+            if replay:
+                return replay
+
+        async with AsyncSessionLocal() as session:
+            user = await UserRepository(session).get_by_telegram_id(telegram_user_id)
+            if user is None:
+                raise ApiError(400, "User not found. They must start the Telegram bot and sign in with an access code.")
+            if user.auth_status == AuthStatus.revoked:
+                raise ApiError(403, "This customer's access has been revoked.")
+            if not UserRepository.is_member(user):
+                raise ApiError(403, "This customer has not signed in to the bot with an access code yet.")
+
+            product = await ProductRepository(session).get_by_id(product_id)
             if not product or not product.is_active:
-                return None, ("Invalid or inactive product ID", 400)
-
-            target_chat, route_source = resolve_supplier_chat(product.supplier_chat_id)
+                raise ApiError(400, "Invalid or inactive product ID")
+            target_chat, _ = resolve_supplier_chat(product.supplier_chat_id)
             if not target_chat:
-                return None, ("No supplier is configured for this product", 503)
+                raise ApiError(503, "No supplier is configured for this product")
 
-            # Count only validated order submissions. These reservations are
-            # committed together with the order below.
-            limit_repo = UserOrderLimitRepository(session)
-            allowed, reason = await limit_repo.check_and_increment(telegram_user_id)
+            store_repo = ApiStoreRepository(session)
+            if store_id is not None and not await store_repo.may_order_for(store_id, telegram_user_id):
+                raise ApiError(403, "This API store is not allowed to order for this customer.")
+
+            # Quota reservations commit together with the order below.
+            allowed, reason = await UserOrderLimitRepository(session).check_and_increment(telegram_user_id)
             if not allowed:
-                return None, (reason, 429)
-            if api_store_id is not None:
-                store_repo = ApiStoreRepository(session)
-                store = await store_repo.get_by_id(api_store_id)
-                if not store:
-                    return None, ("API store is no longer available", 401)
+                raise ApiError(429, reason)
+            if store_id is not None:
+                store = await store_repo.get_by_id(store_id)
+                if store is None:
+                    raise ApiError(401, "API store is no longer available")
                 allowed, reason = await store_repo.check_and_increment(store)
                 if not allowed:
-                    return None, (reason, 429)
-                
-            # Create order
-            order_repo = OrderRepository(session)
-            order = await order_repo.create(
-                user_id=user.id,
-                product_id=product.id,
-                product_name=product.name,
-                quantity=1,
-                player_id=player_id,
-                api_store_id=api_store_id,
-                supplier_fulfillment={
-                    "supplier_chat_id": target_chat,
-                    "category": product.category,
-                    "items": [{"product_name": product.name, "quantity": 1}],
-                },
-            )
-            fulfillment = (await order_repo.get_fulfillments(order.id))[0]
-            order_id = order.order_id
-            fulfillment_id = fulfillment.id
-            created_at_iso = order.created_at.isoformat()
-            status_val = order.status.value
-            prod_name = product.name
-            prod_cat = product.category
-            
-        return {
-            "order_id": order_id,
-            "status": status_val,
-            "product_name": prod_name,
-            "player_id": player_id,
-            "created_at": created_at_iso,
-            "target_chat": target_chat,
-            "route_source": route_source,
-            "category": prod_cat,
-            "api_store_id": api_store_id,
-            "fulfillment_id": fulfillment_id,
-        }, None
+                    raise ApiError(429, reason)
 
-    result, err = run_async(_process())
-    if err:
-        return jsonify({"detail": err[0]}), err[1]
-        
-    # Send Telegram notification to supplier chat.
-    target_chat = result.pop("target_chat", None)
-    route_source = result.pop("route_source", "unconfigured")
-    prod_cat = result.pop("category", "")
-    result.pop("api_store_id", None)
-    supplier_notified = False
-    if target_chat and BOT_TOKEN:
+            try:
+                order = await OrderRepository(session).create_order(
+                    user_id=user.id,
+                    items=[{
+                        "product_id": product.id,
+                        "product_name": product.name,
+                        "quantity": 1,
+                        "unit_price": product.price,
+                    }],
+                    player_id=player_id,
+                    api_store_id=store_id,
+                    idempotency_key=idempotency_key,
+                    fulfillments=[{
+                        "supplier_chat_id": target_chat,
+                        "category": product.category,
+                        "items": [{"product_name": product.name, "quantity": 1}],
+                    }],
+                )
+            except IntegrityError:
+                # Another request with the same Idempotency-Key won the race.
+                await session.rollback()
+                replay = await _replay(store_id) if idempotency_key else None
+                if replay:
+                    return replay
+                raise
+
+        bot, request_client = make_bot()
         try:
-            async def _mark_sending():
-                async with AsyncSessionLocal() as session:
-                    return await OrderRepository(session).mark_fulfillment_sending(
-                        result["fulfillment_id"]
-                    )
-            if not run_async(_mark_sending()):
-                raise RuntimeError("Supplier fulfillment is no longer queued")
+            await dispatch_order(bot, order.id)
+        finally:
+            await request_client.shutdown()
 
-            import urllib.request
-            safe_order_id = html.escape(str(result['order_id']))
-            safe_prod_name = html.escape(str(result['product_name']))
-            safe_cat = html.escape(str(prod_cat))
-            safe_uid = html.escape(str(result['player_id']))
-
-            supplier_text = (
-                f"┌──────────────────────────┐\n"
-                f"│    🆕  API ORDER             │\n"
-                f"└──────────────────────────┘\n\n"
-                f"  🆔  Order:     <b>{safe_order_id}</b>\n"
-                f"  💎  Product:   <b>{safe_prod_name}</b>\n"
-                f"  📂  Category:  <b>{safe_cat}</b>\n"
-                f"  🎯  PUBG UID:  <code>{safe_uid}</code>\n"
-                f"  📦  Quantity:  1\n\n"
-                f"Mark as <b>DONE</b> or <b>ERROR</b>:"
-            )
-            keyboard = {
-                "inline_keyboard": [[
-                    {"text": "✅  Done", "callback_data": f"sup_done:{result['order_id']}:{result['fulfillment_id']}"},
-                    {"text": "❌  Error", "callback_data": f"sup_err:{result['order_id']}:{result['fulfillment_id']}"}
-                ]]
-            }
-            req_data = json.dumps({
-                "chat_id": target_chat,
-                "text": supplier_text,
-                "parse_mode": "HTML",
-                "reply_markup": keyboard
-            }).encode("utf-8")
-            t_req = urllib.request.Request(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                data=req_data,
-                headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(t_req, timeout=5) as t_resp:
-                res_obj = json.loads(t_resp.read().decode("utf-8"))
-                msg_id = res_obj.get("result", {}).get("message_id")
-                if msg_id:
-                    async def _save_msg():
-                        async with AsyncSessionLocal() as session:
-                            repo = OrderRepository(session)
-                            await repo.set_fulfillment_dispatched(result["fulfillment_id"], msg_id)
-                            o = await repo.get_by_order_id(result["order_id"])
-                            if o:
-                                await repo.set_supplier_msg(o, msg_id)
-                    run_async(_save_msg())
-            supplier_notified = True
-            logger.info(
-                "Delivered Flask API order %s to supplier chat %s via %s routing",
-                result["order_id"], target_chat, route_source,
-            )
-        except Exception as e:
-            logger.error("Failed to forward API order to supplier (%s)", type(e).__name__)
-            from config.settings import ADMIN_IDS
-            for admin_id in ADMIN_IDS:
-                try:
-                    admin_alert = json.dumps({
-                        "chat_id": admin_id,
-                        "text": (
-                            f"⚠️ <b>API ORDER DELIVERY FAILED</b>\n\n"
-                            f"Order: <b>{html.escape(str(result['order_id']))}</b> "
-                            f"(Category: {html.escape(str(prod_cat))})\n"
-                            f"Target Chat: <code>{target_chat}</code>\n\n"
-                            "<b>Telegram Error:</b> delivery failed; check the bot logs.\n\n"
-                            f"👉 <i>Make sure the bot is an Administrator in that group!</i>"
-                        ),
-                        "parse_mode": "HTML"
-                    }).encode("utf-8")
-                    a_req = urllib.request.Request(
-                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                        data=admin_alert,
-                        headers={"Content-Type": "application/json"}
-                    )
-                    urllib.request.urlopen(a_req, timeout=3)
-                except Exception:
-                    pass
-
-    if not supplier_notified:
-        async def _mark_failed():
-            async with AsyncSessionLocal() as session:
-                repo = OrderRepository(session)
-                failed_order = await repo.get_by_order_id(result["order_id"])
-                if failed_order:
-                    await repo.set_fulfillment_failed(
-                        result["fulfillment_id"],
-                        "Supplier notification failed; manual follow-up is required.",
-                    )
-                    await repo.refresh_order_status_from_fulfillments(
-                        failed_order.id,
-                        changed_by="api",
-                        note="Supplier notification failed; manual follow-up is required.",
-                    )
-        run_async(_mark_failed())
-        result["status"] = "failed"
-
-    async def _read_final_status():
         async with AsyncSessionLocal() as session:
-            order = await OrderRepository(session).get_by_order_id(result["order_id"])
-            return order.status.value if order else result["status"]
-    result["status"] = run_async(_read_final_status())
+            order = await OrderRepository(session).get_by_order_id(order.order_id)
+        return {**_order_payload(order), "idempotent_replay": False}
 
-    result["supplier_notified"] = supplier_notified
-    result.pop("fulfillment_id", None)
-
-    return jsonify(result), 200
+    return jsonify(run_async(_process())), 200
 
 
 @app.route("/orders/<order_id>", methods=["GET"])
 def get_order_status(order_id):
-    auth_ok, auth_err, api_store_id = authenticate_request()
-    if not auth_ok:
-        return jsonify({"detail": auth_err[0]}), auth_err[1]
+    api_key = _api_key()
 
     async def _fetch():
         async with AsyncSessionLocal() as session:
-            repo = OrderRepository(session)
-            order = await repo.get_by_order_id(order_id, api_store_id=api_store_id)
-            if not order:
-                return None
-            return {"order_id": order.order_id, "status": order.status.value}
+            store_id = await _authenticate(session, api_key)
+            order = await OrderRepository(session).get_by_order_id(order_id.strip().upper(), api_store_id=store_id)
+        if order is None:
+            raise ApiError(404, "Order not found")
+        return _order_payload(order)
 
-    res = run_async(_fetch())
-    if not res:
-        return jsonify({"detail": "Order not found"}), 404
-    return jsonify(res), 200
+    return jsonify(run_async(_fetch())), 200

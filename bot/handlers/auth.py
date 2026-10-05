@@ -195,14 +195,17 @@ async def cb_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Place an order</b>\n"
         "1. Choose a category and package.\n"
         "2. Select the quantity.\n"
-        "3. Enter your PUBG Player ID.\n"
+        "3. Enter your Player ID (or tap a recent one).\n"
         "4. Review the details and submit.\n\n"
-        "We will message you when the order status changes.\n\n"
+        "We will message you when the order status changes. "
+        "Finished orders have an 🔁 <b>Order again</b> button.\n\n"
         "<b>Status guide</b>\n"
-        "⏳ Pending · waiting for processing\n"
-        "⚙️ Processing · supplier is working on it\n"
+        "⏳ Pending · waiting for the supplier\n"
+        "⚙️ Processing · part of the order is done\n"
         "✅ Completed · order is finished\n"
-        "❌ Failed · contact support for help\n\n"
+        "❌ Failed · support will follow up\n"
+        "🚫 Cancelled · not processed; you can order again\n\n"
+        "Need help? Tap 🆘 <b>Support</b> in the menu.\n"
         "Commands: /start · /myorders · /logout",
         parse_mode="HTML",
         reply_markup=back_to_menu_kb(),

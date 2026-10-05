@@ -1,47 +1,57 @@
 """
 Repository for API Store management and User Order Limits.
 """
-import secrets
-from datetime import datetime, timezone
-from sqlalchemy import select, func, update, or_
+from sqlalchemy import delete, select, func, update, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import ApiStore, UserOrderLimit
+from database.models import ApiStore, ApiStoreCustomer, UserOrderLimit
+from utils.helpers import utcnow
+from utils.security import (
+    api_key_prefix, generate_api_key, generate_webhook_secret, hash_api_key,
+)
 
 
-def _utcnow():
-    return datetime.now(timezone.utc)
+def _day_start():
+    return utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 class ApiStoreRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def create(self, name: str, daily_limit: int = 0) -> ApiStore:
-        """Create a new API store with a generated key. daily_limit=0 means unlimited."""
-        api_key = f"nxs_{secrets.token_hex(24)}"
+    async def create(self, name: str, daily_limit: int = 0) -> tuple[ApiStore, str]:
+        """Create a store and return it with its plaintext key, which is never stored."""
+        api_key = generate_api_key()
         store = ApiStore(
             name=name,
-            api_key=api_key,
+            api_key_hash=hash_api_key(api_key),
+            api_key_prefix=api_key_prefix(api_key),
             is_active=True,
             daily_limit=daily_limit,
             orders_today=0,
-            last_reset=_utcnow(),
+            last_reset=utcnow(),
         )
         self.session.add(store)
         await self.session.commit()
         await self.session.refresh(store)
-        return store
+        return store, api_key
+
+    async def rotate_key(self, store: ApiStore) -> str:
+        api_key = generate_api_key()
+        store.api_key_hash = hash_api_key(api_key)
+        store.api_key_prefix = api_key_prefix(api_key)
+        await self.session.commit()
+        return api_key
 
     async def get_by_api_key(self, api_key: str) -> ApiStore | None:
         result = await self.session.execute(
-            select(ApiStore).where(ApiStore.api_key == api_key)
+            select(ApiStore).where(ApiStore.api_key_hash == hash_api_key(api_key))
         )
         return result.scalar_one_or_none()
 
     async def get_by_name(self, name: str) -> ApiStore | None:
         result = await self.session.execute(
-            select(ApiStore).where(ApiStore.name == name)
+            select(ApiStore).where(func.lower(ApiStore.name) == name.casefold())
         )
         return result.scalar_one_or_none()
 
@@ -62,9 +72,67 @@ class ApiStoreRepository:
         store.daily_limit = limit
         await self.session.commit()
 
+    async def set_webhook(self, store: ApiStore, url: str | None) -> str | None:
+        """Set or clear the webhook URL. Returns a newly generated secret when one is created."""
+        store.webhook_url = url
+        new_secret = None
+        if url and not store.webhook_secret:
+            new_secret = generate_webhook_secret()
+            store.webhook_secret = new_secret
+        if not url:
+            store.webhook_secret = None
+        await self.session.commit()
+        return new_secret
+
     async def delete(self, store: ApiStore) -> None:
+        await self.session.execute(delete(ApiStoreCustomer).where(ApiStoreCustomer.store_id == store.id))
         await self.session.delete(store)
         await self.session.commit()
+
+    # ─── Customer links ───────────────────────────────────────────────
+
+    async def get_customer_ids(self, store_id: int) -> list[int]:
+        result = await self.session.execute(
+            select(ApiStoreCustomer.telegram_id)
+            .where(ApiStoreCustomer.store_id == store_id)
+            .order_by(ApiStoreCustomer.telegram_id)
+        )
+        return list(result.scalars().all())
+
+    async def count_customers(self, store_id: int) -> int:
+        return int(await self.session.scalar(
+            select(func.count()).select_from(ApiStoreCustomer)
+            .where(ApiStoreCustomer.store_id == store_id)
+        ) or 0)
+
+    async def may_order_for(self, store_id: int, telegram_id: int) -> bool:
+        """A store with no linked customers may order for any member."""
+        if not await self.count_customers(store_id):
+            return True
+        return await self.session.scalar(
+            select(ApiStoreCustomer.id).where(
+                ApiStoreCustomer.store_id == store_id,
+                ApiStoreCustomer.telegram_id == telegram_id,
+            )
+        ) is not None
+
+    async def link_customers(self, store_id: int, telegram_ids: list[int]) -> int:
+        existing = set(await self.get_customer_ids(store_id))
+        added = 0
+        for telegram_id in dict.fromkeys(telegram_ids):
+            if telegram_id not in existing:
+                self.session.add(ApiStoreCustomer(store_id=store_id, telegram_id=telegram_id))
+                added += 1
+        await self.session.commit()
+        return added
+
+    async def unlink_customers(self, store_id: int, telegram_ids: list[int] | None = None) -> int:
+        statement = delete(ApiStoreCustomer).where(ApiStoreCustomer.store_id == store_id)
+        if telegram_ids is not None:
+            statement = statement.where(ApiStoreCustomer.telegram_id.in_(telegram_ids))
+        result = await self.session.execute(statement)
+        await self.session.commit()
+        return result.rowcount or 0
 
     async def check_and_increment(self, store: ApiStore) -> tuple[bool, str]:
         """
@@ -74,8 +142,7 @@ class ApiStoreRepository:
         if not store.is_active:
             return False, "This API store is disabled by admin."
 
-        now = _utcnow()
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_start = _day_start()
         await self.session.execute(
             update(ApiStore)
             .where(
@@ -83,6 +150,7 @@ class ApiStoreRepository:
                 or_(ApiStore.last_reset.is_(None), ApiStore.last_reset < day_start),
             )
             .values(orders_today=0, last_reset=day_start)
+            .execution_options(synchronize_session=False)
         )
         result = await self.session.execute(
             update(ApiStore)
@@ -92,6 +160,7 @@ class ApiStoreRepository:
                 or_(ApiStore.daily_limit == 0, ApiStore.orders_today < ApiStore.daily_limit),
             )
             .values(orders_today=ApiStore.orders_today + 1)
+            .execution_options(synchronize_session=False)
         )
         if result.rowcount == 1:
             # Leave the update in the caller's transaction. The order and its
@@ -105,73 +174,61 @@ class ApiStoreRepository:
 
 
 class UserOrderLimitRepository:
+    """No row = unlimited. daily_limit 0 = blocked. daily_limit N > 0 = N orders per UTC day."""
+
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def get_or_create(self, telegram_id: int, default_limit: int = 0) -> UserOrderLimit:
-        """Get existing limit or create one. default_limit=0 means unlimited."""
+    async def get(self, telegram_id: int) -> UserOrderLimit | None:
         result = await self.session.execute(
             select(UserOrderLimit).where(UserOrderLimit.telegram_id == telegram_id)
         )
-        limit = result.scalar_one_or_none()
+        return result.scalar_one_or_none()
+
+    async def set_limit(self, telegram_id: int, daily_limit: int) -> UserOrderLimit:
+        """Set or update the daily order limit for a user (0 blocks ordering)."""
+        if daily_limit < 0:
+            raise ValueError("daily_limit must be 0 or higher")
+        limit = await self.get(telegram_id)
         if limit is None:
             limit = UserOrderLimit(
                 telegram_id=telegram_id,
-                daily_limit=default_limit,
+                daily_limit=daily_limit,
                 orders_today=0,
-                last_reset=_utcnow(),
+                last_reset=utcnow(),
             )
             self.session.add(limit)
-            await self.session.commit()
-            await self.session.refresh(limit)
-        return limit
-
-    async def set_limit(self, telegram_id: int, daily_limit: int) -> UserOrderLimit:
-        """Set or update the daily order limit for a user."""
-        limit = await self.get_or_create(telegram_id, daily_limit)
-        limit.daily_limit = daily_limit
+        else:
+            limit.daily_limit = daily_limit
         await self.session.commit()
         return limit
 
-    async def get_all_limited(self) -> list[UserOrderLimit]:
-        """Get all users that have a limit set (non-zero)."""
+    async def get_all(self) -> list[UserOrderLimit]:
+        """All configured limits, including blocked users (limit 0)."""
         result = await self.session.execute(
-            select(UserOrderLimit)
-            .where(UserOrderLimit.daily_limit > 0)
-            .order_by(UserOrderLimit.created_at.desc())
+            select(UserOrderLimit).order_by(UserOrderLimit.daily_limit, UserOrderLimit.created_at.desc())
         )
         return list(result.scalars().all())
 
-    async def remove_limit(self, telegram_id: int) -> None:
+    async def remove_limit(self, telegram_id: int) -> bool:
         result = await self.session.execute(
-            select(UserOrderLimit).where(UserOrderLimit.telegram_id == telegram_id)
+            delete(UserOrderLimit).where(UserOrderLimit.telegram_id == telegram_id)
         )
-        limit = result.scalar_one_or_none()
-        if limit:
-            await self.session.delete(limit)
-            await self.session.commit()
+        await self.session.commit()
+        return bool(result.rowcount)
 
     async def check_and_increment(self, telegram_id: int) -> tuple[bool, str]:
         """
         Check if user can place an order. If yes, increment their counter.
         Returns (allowed: bool, reason: str).
-        Users without a limit entry = unlimited.
         """
-        result = await self.session.execute(
-            select(UserOrderLimit).where(UserOrderLimit.telegram_id == telegram_id)
-        )
-        limit = result.scalar_one_or_none()
-
-        # No limit record = unlimited
+        limit = await self.get(telegram_id)
         if limit is None:
             return True, "OK"
-
-        # daily_limit == 0 means blocked completely
-        if limit.daily_limit == 0:
+        if limit.daily_limit <= 0:
             return False, "Your ordering is currently disabled by admin."
 
-        now = _utcnow()
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_start = _day_start()
         await self.session.execute(
             update(UserOrderLimit)
             .where(
@@ -179,6 +236,7 @@ class UserOrderLimitRepository:
                 or_(UserOrderLimit.last_reset.is_(None), UserOrderLimit.last_reset < day_start),
             )
             .values(orders_today=0, last_reset=day_start)
+            .execution_options(synchronize_session=False)
         )
         result = await self.session.execute(
             update(UserOrderLimit)
@@ -187,6 +245,7 @@ class UserOrderLimitRepository:
                 UserOrderLimit.daily_limit > UserOrderLimit.orders_today,
             )
             .values(orders_today=UserOrderLimit.orders_today + 1)
+            .execution_options(synchronize_session=False)
         )
         if result.rowcount == 1:
             # The caller commits this reservation with the order record.

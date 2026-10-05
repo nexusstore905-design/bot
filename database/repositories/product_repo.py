@@ -184,6 +184,14 @@ class ProductRepository:
             await self.session.commit()
         return products, skipped
 
+    async def set_price(self, product_id: int, price: float | None) -> Product | None:
+        product = await self.get_by_id(product_id)
+        if product is None or not product.is_active:
+            return None
+        product.price = None if price is None else round(price, 2)
+        await self.session.commit()
+        return product
+
     async def update_name(self, product_id: int, new_name: str) -> bool:
         product = await self.get_by_id(product_id)
         if product is None:

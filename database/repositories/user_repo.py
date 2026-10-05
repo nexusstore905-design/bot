@@ -3,7 +3,7 @@ from typing import Optional, List
 import secrets
 import string
 
-from sqlalchemy import distinct, func, select, update
+from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import Order, User, AccessCode, AuthStatus
@@ -70,6 +70,22 @@ class UserRepository:
         total_result = await self.session.execute(select(func.count()).select_from(User))
         return customers, int(total_result.scalar_one() or 0)
 
+    async def get_broadcast_recipients(self, exclude: list[int]) -> list[int]:
+        """Telegram IDs of members who have signed in at least once and are not revoked."""
+        statement = select(User.telegram_id).where(
+            User.last_login.is_not(None),
+            User.auth_status != AuthStatus.revoked,
+        )
+        if exclude:
+            statement = statement.where(User.telegram_id.not_in(exclude))
+        result = await self.session.execute(statement)
+        return list(result.scalars().all())
+
+    @staticmethod
+    def is_member(user: User) -> bool:
+        """True for users who redeemed an access code at some point and are not revoked."""
+        return user.last_login is not None and user.auth_status != AuthStatus.revoked
+
     async def is_locked(self, user: User) -> bool:
         if user.locked_until and user.locked_until > _utcnow():
             return True
@@ -94,7 +110,7 @@ class UserRepository:
             return False, "Your access has been revoked. Contact admin."
 
         if await self.is_locked(user):
-            remaining = (user.locked_until - _utcnow()).seconds // 60 + 1
+            remaining = int((user.locked_until - _utcnow()).total_seconds() // 60) + 1
             return False, f"Too many failed attempts. Try again in {remaining} minutes."
 
         # If already authenticated with a code, they don't need to re-enter

@@ -4,42 +4,36 @@ This guide explains how to connect an online store or other trusted backend to t
 
 ## 1. What the integration does
 
-The store sends an order to the bot API. The API checks the Telegram customer, product, supplier route, and order limits; saves the order; and sends the order to the supplier group configured for that product. The supplier completes or rejects the order in Telegram. The store can then ask the API for the order's current status.
+The store sends an order to the bot API. The API checks the API key, the Telegram customer, the product, the supplier route, and the order limits; saves the order; and delivers it to the supplier group configured for that product. The supplier completes or rejects the order in Telegram. The store learns the result from a signed **webhook** (recommended) or by polling the status endpoint.
 
-Each product uses its own supplier route. For example, if product `8100` is assigned to Supplier A and product `3850` to Supplier B in the bot, an order for `8100` goes to A and an order for `3850` goes to B. The store selects the product by its `product_id`; the API follows the bot's configured route. A global supplier chat is used as a fallback when a product has no individual supplier configured.
+Each product uses its own supplier route. A global supplier chat is used as a fallback when a product has no individual supplier configured.
 
-The API currently creates one unit per request. It does not accept quantity, price, discount, or payment fields. Payment collection and reconciliation remain the store's responsibility.
+One request creates one unit of one product. Payment collection remains the store's responsibility.
 
 ## 2. Before connecting
 
 You will need:
 
-1. A running Telegram bot and its database.
-2. The API service running against the **same database** as the bot.
-3. An active API store and its API key.
-4. The Telegram user ID for each customer and the bot's product ID for each item you plan to sell.
-5. A supplier route configured for each product, or a configured global fallback supplier.
+1. The Telegram bot running as an always-on task, and the API web app, both using the **same database**.
+2. An active API store and its API key.
+3. Each customer's numeric Telegram user ID. The customer must have opened the bot and **signed in with an access code** at least once.
+4. The bot's product ID for each item you sell (`GET /products/` lists them).
 
 ### Create an API store and key
 
-In the bot, open **Admin → Advanced settings → API stores → Add Store**. Give the connected platform a name and save the generated key immediately; the full key is shown only when the store is created. The API store can be disabled and its daily order limit can be changed from the admin controls.
+In the bot, open **Admin → Advanced → API stores → Add Store**. The full key is shown **once**; only a hash is stored, so it cannot be displayed again. If it is lost or exposed, open the store and use **♻️ Rotate key** — the old key stops working immediately.
 
-Use a separate per-store key for each connected platform. A key created for one API store can only check orders created through that store. The optional master `API_KEY` can access orders across stores, so keep it for trusted server-side administration and do not distribute it to a storefront.
+From the store screen an admin can also:
 
-### Find product IDs
+- disable/enable the store and set a daily order limit,
+- set a **webhook** URL (see section 7),
+- restrict which customers the store may order for (**👥 Customers**). A store with no linked customers may order for any signed-in member.
 
-Use the product IDs shown in the bot's product administration/database. The API does not currently provide a product catalog or price endpoint. Keep a mapping in your store, for example:
-
-| Store item/SKU | Bot `product_id` | Bot product name | Supplier route configured in bot |
-|---|---:|---|---|
-| `pubg-8100` | `8100` | Product name from bot | Supplier A |
-| `pubg-3850` | `3850` | Product name from bot | Supplier B |
-
-The sample IDs above are illustrative; confirm the actual IDs in your bot before using them.
+Use a separate key for each connected platform. A store key can only read orders created with that store's key. The optional master `API_KEY` can read orders across stores; keep it for trusted server-side administration.
 
 ## 3. Run and expose the API
 
-The Flask application object is `app` in `api/flask_app.py`. The API process must have the same `BOT_TOKEN` and `DATABASE_URL` configuration as the bot. If `DATABASE_URL` is omitted, the project defaults to its local SQLite database; separate machines or containers must not accidentally use separate default database files. Relative SQLite URLs such as `sqlite+aiosqlite:///./nexus_bot.db` are resolved from the project directory so a WSGI process and the bot task do not silently create different databases because they started in different working directories. If the app and bot run from separate project copies, configure both to use the same absolute database path or shared database service.
+The Flask application object is `app` in `api/flask_app.py`. Configure a WSGI host (PythonAnywhere Web tab) to load it over HTTPS. The web app applies any pending database migrations when it starts, so it never depends on the bot task having been restarted first.
 
 For local development from the project directory:
 
@@ -47,97 +41,94 @@ For local development from the project directory:
 flask --app api.flask_app:app run --host 127.0.0.1 --port 5000
 ```
 
-The local base URL is then `http://127.0.0.1:5000`. To call from another machine on a private development network, bind to the appropriate interface and use that machine's address. The Flask development server is for development only. For a live store, configure a production WSGI host to load `api.flask_app:app` (the bot admin panel currently points to the PythonAnywhere Web tab), use HTTPS, and ensure the API service and bot share the intended database.
+**The Telegram bot must also run as a separate persistent process** (`main.py`, PythonAnywhere Always-on task). It handles supplier delivery retries, supplier timeouts, and webhook delivery. Use the same `BOT_TOKEN` and `DATABASE_URL` for both.
 
-**Run the Telegram bot as a separate persistent process as well.** The 10-minute supplier timeout worker starts from `main.py`; the Flask WSGI app does not run that worker. On PythonAnywhere, configure an Always-on task using the project's virtual-environment Python and the full path to `main.py`. Both the web app and this bot task must use the same project files, `BOT_TOKEN`, and `DATABASE_URL`. Reloading only the Web app does not restart the timeout worker. On bot startup, its task log should show `Supplier expiry worker started`.
-
-Set environment variables in the API host's protected configuration. Do not put secrets in source control or in a public web page:
+Environment variables:
 
 ```text
 BOT_TOKEN=<the bot token>
-DATABASE_URL=<the same database URL used by the bot>
+DATABASE_URL=<optional; defaults to nexus_bot.db in the project folder>
 API_KEY=
 API_CORS_ORIGINS=
+CURRENCY=USDT
+SUPPLIER_TIMEOUT_MINUTES=10
 ```
 
-`API_KEY` is optional when using per-store keys only. If you configure it, use a long random secret and restrict its use to trusted backend services. Restart the API process after changing its environment.
-
-After deployment, check:
+### Health check
 
 ```text
-GET https://YOUR_API_HOST/
-GET https://YOUR_API_HOST/health
+GET /health
+GET /health?require_bot=1
 ```
 
-The root endpoint returns the service name and route names. `/health` checks database connectivity and does not require an API key. It returns HTTP `200` when the database is reachable and `503` when it is not.
+`/health` needs no key. It returns `503` if the database is unreachable. Otherwise it returns `200` with `"bot": "ok" | "stale" | "unknown"`, based on a heartbeat the bot writes every 30 seconds. Point an uptime monitor at `/health?require_bot=1` to get a `503` when the bot task has stopped.
 
-Use the origin root as `BASE_URL`, without adding `/orders/` to it. For example:
+## 4. Authentication
 
-```text
-BASE_URL=https://api.example.com
-```
-
-## 4. Authentication and key handling
-
-Every order endpoint request must include the key in the `X-API-Key` HTTP header:
+Every endpoint except `/` and `/health` requires the key in the `X-API-Key` header:
 
 ```http
 X-API-Key: YOUR_STORE_API_KEY
 ```
 
-Do not put the key in a URL, query string, HTML page, browser JavaScript bundle, mobile app, or source repository. Browser users can inspect those values. For a browser storefront, call your own backend first; have that backend add `X-API-Key` and call this API over HTTPS.
+Never put the key in a URL, browser JavaScript, or a mobile app. Browser storefronts should call their own backend, which adds the key.
 
-If a key is exposed, disable the API store in the bot admin controls and issue a replacement through the store/key management workflow. Treat API keys like passwords.
+## 5. List products
 
-## 5. Create an order
+```http
+GET /products/
+X-API-Key: YOUR_STORE_API_KEY
+```
 
-### Endpoint
+```json
+{
+  "products": [
+    {"product_id": 3, "category": "PUBG UC Top Up", "name": "660 UC", "price": 9.99, "currency": "USDT"}
+  ]
+}
+```
+
+`price` is `null` unless the admin has enabled price display and set a price for that product.
+
+## 6. Create an order
 
 ```http
 POST /orders/
 Content-Type: application/json
 X-API-Key: YOUR_STORE_API_KEY
+Idempotency-Key: your-checkout-id-123
 ```
 
-### Request fields
-
-| Field | Type | Required | Meaning and validation |
+| Field | Type | Required | Validation |
 |---|---|---:|---|
-| `telegram_user_id` | integer | Yes | Telegram numeric ID of a user who has started the bot at least once. |
-| `product_id` | integer | Yes | ID of an active product in the bot. This product's configured supplier route is used. |
-| `player_id` | string | Yes | PUBG player ID: digits only, starts with `5`, and 5–16 digits long. Send as a string to preserve it exactly. |
+| `telegram_user_id` | integer | Yes | A customer who signed in to the bot with an access code and is not revoked. If the store has linked customers, it must be one of them. |
+| `product_id` | integer | Yes | An active product. |
+| `player_id` | string | Yes | 3–20 characters, no spaces. Send as a string. |
 
-The JSON body must be an object. Quantity is always one. The API does not verify whether your customer paid; submit orders only according to your store's payment policy.
+### Safe retries with `Idempotency-Key`
 
-### cURL example
+Send a unique `Idempotency-Key` header (1–64 printable ASCII characters, e.g. your checkout ID) with every order. If the request times out, **retry with the same key**: you get the original order back with `"idempotent_replay": true` and no duplicate is created. Reusing a key with a different customer, product, or player ID returns `409`.
+
+### Example
 
 ```bash
 curl -X POST "https://YOUR_API_HOST/orders/" \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: YOUR_STORE_API_KEY" \
-  -d '{
-    "telegram_user_id": 123456789,
-    "product_id": 8100,
-    "player_id": "5123456789"
-  }'
+  -H "X-API-Key: $NEXUS_STORE_API_KEY" \
+  -H "Idempotency-Key: checkout-123" \
+  -d '{"telegram_user_id": 123456789, "product_id": 3, "player_id": "5123456789"}'
 ```
-
-Replace the example user/product/player IDs with real values. Do not include the key directly in a command that will be saved in shell history on a shared machine.
 
 ### Node.js backend example
 
-This example uses Node's built-in `fetch`. Store the key in the backend environment, such as `process.env.NEXUS_STORE_API_KEY`.
-
 ```js
-const baseUrl = process.env.NEXUS_API_BASE_URL;
-const apiKey = process.env.NEXUS_STORE_API_KEY;
-
-async function createBotOrder({ telegramUserId, productId, playerId }) {
-  const response = await fetch(`${baseUrl}/orders/`, {
+async function createBotOrder({ checkoutId, telegramUserId, productId, playerId }) {
+  const response = await fetch(`${process.env.NEXUS_API_BASE_URL}/orders/`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-API-Key": apiKey,
+      "X-API-Key": process.env.NEXUS_STORE_API_KEY,
+      "Idempotency-Key": checkoutId,
     },
     body: JSON.stringify({
       telegram_user_id: telegramUserId,
@@ -145,7 +136,6 @@ async function createBotOrder({ telegramUserId, productId, playerId }) {
       player_id: String(playerId),
     }),
   });
-
   const result = await response.json();
   if (!response.ok) {
     throw new Error(`Nexus API ${response.status}: ${result.detail ?? "Request failed"}`);
@@ -154,145 +144,122 @@ async function createBotOrder({ telegramUserId, productId, playerId }) {
 }
 ```
 
-Call this from your server after your store has decided the order is ready to submit. Save the returned `order_id` alongside your store's order record.
-
-### Successful response
-
-HTTP `200` returns a JSON object similar to:
+### Successful response (HTTP 200)
 
 ```json
 {
-  "order_id": "NX-ABC123",
+  "order_id": "NX48213907",
   "status": "pending",
-  "product_name": "Product name from bot",
+  "product_id": 3,
+  "product_name": "660 UC",
+  "quantity": 1,
+  "unit_price": 9.99,
+  "currency": "USDT",
   "player_id": "5123456789",
-  "created_at": "2026-10-02T10:15:00+00:00",
-  "supplier_notified": true
+  "created_at": "2026-10-06T10:15:00+00:00",
+  "updated_at": "2026-10-06T10:15:00+00:00",
+  "supplier_notified": true,
+  "delivery": "sent",
+  "idempotent_replay": false
 }
 ```
 
-The exact order ID, product name, timestamp, and initial status will differ. The response does not include a price, quantity, or payment result. `supplier_notified: true` means the API delivered the Telegram supplier message; it does not mean the supplier has completed the order.
+`delivery` is one of:
 
-Important: supplier delivery failure is currently returned as HTTP `200` with `status: "failed"` and `supplier_notified: false`. The order record still exists, and the bot alerts its admins for manual follow-up. Check both HTTP status and the JSON `status`/`supplier_notified` fields.
+| Value | Meaning |
+|---|---|
+| `sent` | The supplier group received the order. |
+| `retrying` | Telegram delivery failed; the bot retries automatically (about 20 s and 60 s later). Do **not** resubmit. |
+| `failed` | Delivery failed after all retries; the order becomes `failed` and admins are alerted. |
 
-## 6. Check order status
+`unit_price` is the product price at order time, or `null` if none was set.
 
-### Endpoint
+## 7. Webhooks (recommended)
+
+When an admin sets a webhook URL for your store, the bot POSTs an event every time one of your orders changes status:
+
+```http
+POST https://your-store.example/hooks/nexus
+Content-Type: application/json
+X-Nexus-Event: order.status_changed
+X-Nexus-Event-Id: 1842
+X-Nexus-Signature: t=1791281700,v1=5f2c…
+```
+
+```json
+{
+  "event": "order.status_changed",
+  "order_id": "NX48213907",
+  "status": "completed",
+  "previous_status": "pending",
+  "occurred_at": "2026-10-06T10:18:42+00:00"
+}
+```
+
+**Verify every request.** The signing secret is shown once, when the webhook is first set. Compute HMAC-SHA256 over `"<t>.<raw body>"` with the secret and compare it with `v1`; reject timestamps older than a few minutes.
+
+```js
+import crypto from "node:crypto";
+
+function verifyNexusSignature(rawBody, header, secret) {
+  const parts = Object.fromEntries(header.split(",").map((p) => p.split("=")));
+  const expected = crypto.createHmac("sha256", secret).update(`${parts.t}.${rawBody}`).digest("hex");
+  const fresh = Math.abs(Date.now() / 1000 - Number(parts.t)) < 300;
+  return fresh && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(parts.v1));
+}
+```
+
+Respond with any `2xx` status quickly. Failed deliveries are retried with exponential backoff (30 s, 1 min, 2 min, … up to 8 attempts). Events can arrive more than once; use `X-Nexus-Event-Id` or `order_id` + `status` to ignore duplicates.
+
+## 8. Check order status
 
 ```http
 GET /orders/{order_id}
 X-API-Key: YOUR_STORE_API_KEY
 ```
 
-Example:
+Returns the same fields as order creation (without `idempotent_replay`). Store keys can only see their own orders; anything else returns `404`.
 
-```bash
-curl "https://YOUR_API_HOST/orders/NX-ABC123" \
-  -H "X-API-Key: YOUR_STORE_API_KEY"
-```
-
-Response:
-
-```json
-{
-  "order_id": "NX-ABC123",
-  "status": "processing"
-}
-```
-
-Store API keys can only retrieve orders placed using that store's key. The master key, if configured, can retrieve orders from any store. An unknown order or an order outside the calling store's scope returns `404`.
-
-### Status values
-
-| Status | Meaning for the store |
+| Status | Meaning |
 |---|---|
-| `pending` | The order is waiting for supplier action, or no supplier fulfillment has reached a final result yet. |
-| `processing` | At least one supplier fulfillment has finished, while other fulfillment work is still outstanding. |
-| `completed` | All supplier fulfillment work was marked complete. |
-| `failed` | Supplier delivery or fulfillment failed. Admin/supplier follow-up may be needed. |
-| `cancelled` | The bot cancelled an order after it remained unresolved past its configured timeout. |
+| `pending` | Waiting for the supplier. |
+| `processing` | Part of the order is finished; other parts are outstanding. |
+| `completed` | All supplier work was marked complete. |
+| `failed` | Delivery or fulfillment failed, or only part of the order was completed. Admin follow-up needed. |
+| `cancelled` | The supplier did not respond within the timeout (default 10 minutes **after delivery**) and nothing was completed. |
 
-The API does not send a store webhook or callback. Your backend should poll the status endpoint at a reasonable interval, stop when the status is terminal (`completed`, `failed`, or `cancelled`), and apply your own customer notification/refund process. Do not poll continuously at very short intervals.
+Without a webhook, poll every 30–60 seconds and stop at a terminal status (`completed`, `failed`, `cancelled`).
 
-## 7. HTTP errors and what to do
+## 9. Errors
 
-Errors use a JSON body like `{"detail":"..."}`.
+Errors use `{"detail": "..."}`. Unexpected server errors return `500` with `{"detail": "Internal server error", "error_id": "..."}`; quote the `error_id` to the bot admin.
 
-| HTTP | Typical cause | Recommended handling |
+| HTTP | Cause | What to do |
 |---:|---|---|
-| `400` | Missing/invalid field, invalid or inactive product, or Telegram user has not started the bot. | Fix the data or have the customer start the bot, then submit a corrected order. |
-| `401` | Missing/invalid API key, or API store is no longer available. | Check the secret and header; do not retry with a key embedded in a URL. |
-| `403` | The API store has been disabled by the bot admin. | Ask the bot admin to enable the store. |
-| `404` | Order ID is unknown or not visible to this API store key. | Check the saved ID and which store key created the order. |
-| `429` | Store daily order limit or the Telegram user's daily limit was reached. | Show an appropriate message or wait for the next daily reset; ask the admin to review limits if needed. |
-| `503` | No supplier is configured for this product, or the health check cannot reach the database. | Check product/global supplier configuration or database availability before retrying. |
+| `400` | Invalid JSON/field, inactive product, unknown customer. | Fix the request. |
+| `401` | Missing or invalid API key. | Check the key; it may have been rotated. |
+| `403` | Store disabled; customer revoked or never signed in; store not allowed to order for this customer. | Ask the bot admin. |
+| `404` | Order not found for this key. | Check the ID and key. |
+| `409` | `Idempotency-Key` reused for a different order. | Use a new key for a new order. |
+| `429` | Store or customer daily limit reached (UTC days). | Wait for the reset or ask the admin. |
+| `503` | No supplier configured for the product, or database unavailable. | Ask the admin to configure routing. |
 
-Supplier Telegram delivery failure is an exception to the HTTP error table: it is represented as a `200` response with a failed order status, as described above.
+## 10. Quotas
 
-## 8. Quotas and order accounting
+- Each store has its own daily limit (`0` = unlimited). Each customer can also have one (no limit = unlimited, `0` = blocked).
+- Counters reset at UTC midnight and are reserved when an order is accepted.
+- The master key bypasses store quotas and scoping; customer limits still apply.
 
-- Each API store has an independent daily order limit. In the admin store settings, `0` means unlimited.
-- Telegram users may also have an individual daily limit. A user with no limit configured is unlimited; an explicit user limit of `0` blocks ordering.
-- The bot resets daily counters using UTC midnight.
-- The counters are reserved when the valid order is accepted and saved. Supplier completion does not undo that count.
-- The optional master API key bypasses the per-store quota and per-store order scoping, but user-level order limits still apply.
+## 11. Browser/CORS
 
-## 9. Browser/CORS setup
-
-Server-to-server store integrations do not need CORS. If a browser must call the API directly, set `API_CORS_ORIGINS` to a comma-separated list of exact origins, including scheme and port where applicable, for example:
-
-```text
-API_CORS_ORIGINS=https://store.example.com,https://admin.store.example.com
-```
-
-The API allows `GET`, `POST`, and `OPTIONS`, and the `Content-Type` and `X-API-Key` headers for listed origins. Restart the API after changing this setting. CORS only controls browser access; it does not protect a key placed in frontend code. Keep the key on your server and proxy storefront requests through your backend.
-
-## 10. Reliability notes and current API limits
-
-### Avoid duplicate orders after a timeout
-
-The API currently has no idempotency key or external store order reference. If your `POST /orders/` call times out, the API may already have created the order. Do not blindly submit the same purchase again, because that can create a duplicate recharge request. First reconcile with the bot admin using the customer, product, player ID, and approximate time. Save the returned `order_id` as soon as a response arrives.
-
-For stronger duplicate protection, a future API improvement would accept a unique store order ID or `Idempotency-Key` and return the original bot order on safe retries.
-
-### Product catalog and price
-
-There is no API endpoint to list products, prices, stock, or supplier routes. Manage the product-to-ID mapping in your store and keep it synchronized with the bot admin configuration. Your store controls the customer price; the bot API does not quote or charge the customer.
-
-### One item per request
-
-One API request creates one bot order for one product and quantity one. To sell a multi-item basket, submit one request per bot product and record all returned order IDs against the store checkout. If the basket spans different supplier routes, the bot routes each product order according to its own configuration.
-
-### No webhook
-
-The API has no webhook registration endpoint. Poll `GET /orders/{order_id}` from your backend or have an admin review the order in the bot.
-
-## 11. Suggested store-side flow
-
-1. Customer chooses an item and enters their Telegram ID and PUBG player ID.
-2. Store validates its own checkout/payment rules and maps the item to the bot's `product_id`.
-3. Store backend calls `POST /orders/` with the customer Telegram ID, product ID, and player ID.
-4. Store saves the `order_id` returned by the API and shows the customer that fulfillment is pending.
-5. Store backend periodically calls `GET /orders/{order_id}`.
-6. On `completed`, mark the store order fulfilled. On `failed` or `cancelled`, route it to support/admin handling under your refund or retry policy.
-
-## 12. Quick troubleshooting checklist
-
-- `401`: Is `X-API-Key` present, copied correctly, and associated with an active API store?
-- `403`: Did an admin disable this API store?
-- `400 User not found`: Has the customer opened the Telegram bot and pressed Start? Is the numeric Telegram ID correct?
-- `400 Invalid or inactive product ID`: Is the product ID correct and active?
-- `400 Invalid player_id`: Is it a string of 5–16 digits beginning with `5`?
-- `429`: Has the store or customer reached a daily order limit?
-- `503 No supplier is configured`: Is a supplier assigned to this product or is the global fallback configured?
-- `/health` returns `503`: Is the API using the same reachable database configuration as the bot?
-- HTTP `200` but `supplier_notified: false`: The order was recorded but Telegram delivery failed; check bot logs, bot token, supplier chat, and bot membership/permissions, and follow up with an admin before creating another order.
+Server-to-server integrations need no CORS. For direct browser calls, set `API_CORS_ORIGINS` to exact origins, e.g. `https://store.example.com`. The `null` origin (local `file://` pages) is accepted only if listed explicitly. CORS does not protect a key placed in frontend code.
 
 ## Endpoint summary
 
-| Method | Path | Authentication | Purpose |
+| Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `GET` | `/` | None | Service status and route names |
-| `GET` | `/health` | None | Database connectivity check |
-| `POST` | `/orders/` | `X-API-Key` | Create one product order |
-| `GET` | `/orders/{order_id}` | `X-API-Key` | Read order status |
+| `GET` | `/` | None | Service info |
+| `GET` | `/health` | None | Database and bot status |
+| `GET` | `/products/` | `X-API-Key` | Active products |
+| `POST` | `/orders/` | `X-API-Key` | Create one order (send `Idempotency-Key`) |
+| `GET` | `/orders/{order_id}` | `X-API-Key` | Order status and details |

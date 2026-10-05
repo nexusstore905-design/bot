@@ -48,6 +48,13 @@ if DATABASE_URL.startswith("sqlite"):
         ).render_as_string(hide_password=False)
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
+# PythonAnywhere keeps files on network storage, where SQLite WAL mode is unsafe.
+# Leave DELETE unless the database lives on a local disk.
+SQLITE_JOURNAL_MODE: str = os.getenv("SQLITE_JOURNAL_MODE", "DELETE").strip().upper() or "DELETE"
+
+# Minutes a supplier group has to act on an order part after it was delivered.
+SUPPLIER_TIMEOUT_MINUTES: int = max(1, int(os.getenv("SUPPLIER_TIMEOUT_MINUTES", "10")))
+
 # REST API
 API_KEY: str = os.getenv("API_KEY", "").strip()
 if API_KEY == "change-this-to-a-secret-key":

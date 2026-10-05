@@ -1,5 +1,4 @@
 """Supplier actions scoped to the supplier group assigned to each order part."""
-import html
 import json
 import logging
 
@@ -10,10 +9,13 @@ from telegram.ext import ContextTypes, MessageHandler, CallbackQueryHandler, fil
 from database.database import AsyncSessionLocal
 from database.models import (
     OrderStatus, SupplierFulfillmentStatus, OrderItem, Product,
+    OPEN_ORDER_STATUSES, TERMINAL_ORDER_STATUSES,
 )
 from database.repositories.order_repo import OrderRepository
-from config.settings import SUPPLIER_CHAT_ID
+from services.messages import supplier_closed_text
+from services.notify import announce_order_status, notify_admins
 from utils.supplier_routing import resolve_supplier_chat
+from utils.ui import esc
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ async def _process_supplier_action(
         repo = OrderRepository(session)
         order = await repo.get_by_order_id(order_id)
         if order is None:
-            return {"ok": False, "message": f"⚠️ Order <code>{html.escape(order_id)}</code> not found."}
+            return {"ok": False, "message": f"⚠️ Order <code>{esc(order_id)}</code> not found."}
 
         fulfillment = None
         if fulfillment_id is not None:
@@ -66,18 +68,18 @@ async def _process_supplier_action(
             if len(matches) != 1:
                 return {
                     "ok": False,
-                    "message": "⚠️ This order has multiple supplier tasks. Use the buttons on the matching order message.",
+                    "message": "⚠️ Use the buttons on the matching order message for this order.",
                 }
             fulfillment = matches[0]
 
         if fulfillment is not None:
-            if order.status not in (OrderStatus.pending, OrderStatus.processing):
-                return {
-                    "ok": False,
-                    "message": f"⚠️ Order <code>{html.escape(order_id)}</code> is already <b>{order.status.value}</b>.",
-                }
             if fulfillment.supplier_chat_id != chat_id:
                 return {"ok": False, "message": "⛔ This order action is for a different supplier group."}
+            if order.status not in OPEN_ORDER_STATUSES:
+                return {
+                    "ok": False,
+                    "message": f"⚠️ Order <code>{esc(order_id)}</code> is already <b>{order.status.value}</b>.",
+                }
             if fulfillment.status not in (
                 SupplierFulfillmentStatus.pending, SupplierFulfillmentStatus.sending,
             ):
@@ -98,13 +100,12 @@ async def _process_supplier_action(
                     "ok": False,
                     "message": "⛔ This supplier message is outdated or belongs to another group. Ask an admin for help.",
                 }
-            if order.status not in (OrderStatus.pending, OrderStatus.processing):
+            if order.status not in OPEN_ORDER_STATUSES:
                 return {
                     "ok": False,
-                    "message": f"⚠️ Order <code>{html.escape(order_id)}</code> is already <b>{order.status.value}</b>.",
+                    "message": f"⚠️ Order <code>{esc(order_id)}</code> is already <b>{order.status.value}</b>.",
                 }
-            from database.models import OrderStatus as OverallOrderStatus
-            overall = OverallOrderStatus.completed if new_status == SupplierFulfillmentStatus.completed else OverallOrderStatus.failed
+            overall = OrderStatus.completed if new_status == SupplierFulfillmentStatus.completed else OrderStatus.failed
             updated = await repo.update_status(order, overall, changed_by=changed_by)
             if not updated:
                 return {"ok": False, "message": "⚠️ This order was already updated."}
@@ -114,8 +115,6 @@ async def _process_supplier_action(
         return {
             "ok": True,
             "order_id": order.order_id,
-            "customer_id": order.user.telegram_id,
-            "player_id": order.player_id,
             "item_names": item_names,
             "fulfillment_status": new_status,
             "order_status": final_status,
@@ -124,59 +123,30 @@ async def _process_supplier_action(
         }
 
 
-async def _notify_customer(context: ContextTypes.DEFAULT_TYPE, result: dict) -> None:
-    status = result["order_status"]
-    if status not in (OrderStatus.completed, OrderStatus.failed):
-        if result["fulfillment_status"] == SupplierFulfillmentStatus.failed:
-            text = (
-                "⚠️ <b>One supplier group reported an issue</b>\n\n"
-                f"Order <code>{html.escape(result['order_id'])}</code> is still being coordinated. "
-                "The remaining supplier work will continue, and support has been notified."
-            )
-        else:
-            return
-    elif status == OrderStatus.completed:
-        items = ", ".join(html.escape(name, quote=False) for name in result["item_names"])
-        text = (
-            "🎉 <b>Order completed</b>\n──────────────\n\n"
-            f"🧾 <b>Order ID</b>  <code>{html.escape(result['order_id'])}</code>\n"
-            f"📦 {items}\n"
-            f"🎮 <b>Player ID</b>  <code>{html.escape(result['player_id'])}</code>\n\n"
-            "All supplier groups have completed your order."
+async def _after_supplier_action(context: ContextTypes.DEFAULT_TYPE, result: dict) -> None:
+    if result["fulfillment_status"] == SupplierFulfillmentStatus.failed:
+        await notify_admins(
+            context.bot,
+            "⚠️ <b>SUPPLIER REPORTED AN ORDER ISSUE</b>\n\n"
+            f"Order: <code>{esc(result['order_id'])}</code>\n"
+            f"Product group: {esc(result.get('category') or 'Unknown')}\n"
+            f"Supplier chat: <code>{result['supplier_chat_id']}</code>\n"
+            f"Current order status: <b>{result['order_status'].value.upper()}</b>",
         )
-    else:
-        text = (
-            "❌ <b>Order needs support</b>\n──────────────\n\n"
-            f"🧾 <b>Order ID</b>  <code>{html.escape(result['order_id'])}</code>\n\n"
-            "A supplier could not complete the order. Please contact support."
+    headline = None
+    if (
+        result["order_status"] not in TERMINAL_ORDER_STATUSES
+        and result["fulfillment_status"] == SupplierFulfillmentStatus.failed
+    ):
+        headline = (
+            "⚠️ <b>One supplier group reported an issue</b>\n"
+            "The rest of your order continues, and support has been notified."
         )
-    try:
-        await context.bot.send_message(chat_id=result["customer_id"], text=text, parse_mode="HTML")
-    except Exception as exc:
-        logger.warning("Could not notify customer about order %s (%s)", result["order_id"], type(exc).__name__)
-
-
-async def _notify_admins(context: ContextTypes.DEFAULT_TYPE, result: dict) -> None:
-    if result["fulfillment_status"] != SupplierFulfillmentStatus.failed:
-        return
-    from config.settings import ADMIN_IDS
-    category = html.escape(result.get("category") or "Unknown", quote=False)
-    text = (
-        "⚠️ <b>SUPPLIER REPORTED AN ORDER ISSUE</b>\n\n"
-        f"Order: <code>{html.escape(result['order_id'])}</code>\n"
-        f"Product group: {category}\n"
-        f"Supplier chat: <code>{result['supplier_chat_id']}</code>\n"
-        f"Current order status: <b>{result['order_status'].value.upper()}</b>"
-    )
-    for admin_id in ADMIN_IDS:
-        try:
-            await context.bot.send_message(chat_id=admin_id, text=text, parse_mode="HTML")
-        except Exception as exc:
-            logger.warning("Could not notify admin %s about order %s (%s)", admin_id, result["order_id"], type(exc).__name__)
+    await announce_order_status(context.bot, result["order_id"], headline=headline)
 
 
 async def handle_supplier_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Support DONE/ERROR text command in any configured supplier group."""
+    """Support `DONE NX12345678` / `ERROR NX12345678` text commands in supplier groups."""
     if not update.message or not update.message.text:
         return
     parts = update.message.text.strip().upper().split()
@@ -191,12 +161,10 @@ async def handle_supplier_message(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(result["message"], parse_mode="HTML")
         return
     await update.message.reply_text(
-        f"✅ Supplier task for <code>{html.escape(order_id)}</code> marked <b>{status.value.upper()}</b>.",
+        f"✅ Supplier task for <code>{esc(order_id)}</code> marked <b>{status.value.upper()}</b>.",
         parse_mode="HTML",
     )
-    await _notify_admins(context, result)
-    await _notify_customer(context, result)
-
+    await _after_supplier_action(context, result)
 
 
 async def cb_supplier_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -224,26 +192,62 @@ async def cb_supplier_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     icon = "✅" if status == SupplierFulfillmentStatus.completed else "❌"
-    original_text = query.message.text or ""
-    new_text = original_text.split("Mark this group’s items as")[0].split("Mark as")[0].rstrip()
-    new_text += f"\n\n{icon} <b>This group marked {status.value.upper()}</b>"
+    footer = f"{icon} <b>This group marked {status.value.upper()}</b> by {esc(update.effective_user.full_name or update.effective_user.id)}"
     if result["order_status"] in (OrderStatus.completed, OrderStatus.failed):
-        new_text += f"\nOverall order: <b>{result['order_status'].value.upper()}</b>"
+        footer += f"\nOverall order: <b>{result['order_status'].value.upper()}</b>"
     else:
-        new_text += "\nOther supplier groups are still processing."
-    await query.message.edit_text(new_text, parse_mode="HTML", reply_markup=None)
-    await _notify_admins(context, result)
-    await _notify_customer(context, result)
+        footer += "\nOther supplier groups are still processing."
+    # text_html keeps the original formatting escaped, so names like "a<b" cannot break the edit.
+    try:
+        await query.message.edit_text(
+            supplier_closed_text(query.message.text_html or "", footer),
+            parse_mode="HTML",
+            reply_markup=None,
+        )
+    except Exception as exc:
+        logger.warning("Could not edit supplier message for %s (%s)", order_id, type(exc).__name__)
+        await query.message.reply_text(footer, parse_mode="HTML")
+    await _after_supplier_action(context, result)
+
+
+async def handle_supplier_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """A photo replying to an order message is forwarded to the customer as delivery proof."""
+    message = update.message
+    if not message or not message.photo or not message.reply_to_message:
+        return
+    async with AsyncSessionLocal() as session:
+        part = await OrderRepository(session).set_fulfillment_proof(
+            message.chat.id, message.reply_to_message.message_id, message.photo[-1].file_id,
+        )
+    if part is None:
+        return
+    order = part.order
+    try:
+        await context.bot.send_photo(
+            chat_id=order.user.telegram_id,
+            photo=part.proof_file_id,
+            caption=(
+                f"📸 <b>Delivery proof</b> for order <code>{esc(order.order_id)}</code>\n"
+                f"Product group: {esc(part.category)}"
+            ),
+            parse_mode="HTML",
+        )
+        await message.reply_text("📸 Proof sent to the customer.")
+    except Exception as exc:
+        logger.warning("Could not forward proof for %s (%s)", order.order_id, type(exc).__name__)
+        await message.reply_text("⚠️ Proof saved, but the customer could not be reached.")
 
 
 def get_supplier_handlers() -> list:
     return [
-        # Handle DONE/ERROR text commands from any group (validated by order lookup)
+        # Text commands only in groups, so private chats never reveal order details.
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
+            filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
             handle_supplier_message,
         ),
-        # Handle Done/Error inline buttons
+        MessageHandler(
+            filters.ChatType.GROUPS & filters.PHOTO & filters.REPLY,
+            handle_supplier_proof,
+        ),
         CallbackQueryHandler(cb_supplier_action, pattern=r"^sup_(done|err|error):"),
     ]
-

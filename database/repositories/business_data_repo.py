@@ -6,6 +6,10 @@ from config.settings import ADMIN_IDS
 from database.models import (
     AccessCode,
     ApiStore,
+    ApiStoreCustomer,
+    SavedPlayerId,
+    SupportMessage,
+    WebhookEvent,
     Order,
     OrderItem,
     OrderStatusHistory,
@@ -32,6 +36,10 @@ class BusinessDataRepository:
     # Child tables must be cleared before their parents when SQLite foreign keys
     # are enabled. Payment clearance is stored on Order, so deleting orders clears it.
     _delete_order = (
+        WebhookEvent,
+        SupportMessage,
+        SavedPlayerId,
+        ApiStoreCustomer,
         SupplierFulfillment,
         OrderStatusHistory,
         OrderItem,

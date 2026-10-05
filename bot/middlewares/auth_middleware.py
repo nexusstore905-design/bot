@@ -11,6 +11,7 @@ from database.database import AsyncSessionLocal
 from database.repositories.user_repo import UserRepository
 from database.models import AuthStatus
 from config.settings import ADMIN_IDS
+from services import app_settings
 
 # Inbound Anti-Flood memory (User ID -> Timestamp)
 USER_LAST_REQUEST: OrderedDict[int, float] = OrderedDict()
@@ -47,8 +48,7 @@ async def require_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
     if user.id in ADMIN_IDS:
         return True
 
-    import os
-    if os.path.exists("maintenance.flag"):
+    if await app_settings.is_maintenance():
         msg = update.message or (update.callback_query.message if update.callback_query else None)
         if msg:
             context.user_data["auth_rejection_sent"] = True
@@ -75,9 +75,8 @@ async def require_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
             msg = update.message or (update.callback_query.message if update.callback_query else None)
             if msg:
                 context.user_data["auth_rejection_sent"] = True
-                from datetime import timezone
-                import datetime
-                remaining = (db_user.locked_until - datetime.datetime.now(timezone.utc)).seconds // 60 + 1
+                from utils.helpers import utcnow
+                remaining = int((db_user.locked_until - utcnow()).total_seconds() // 60) + 1
                 await msg.reply_text(f"🔒  Account locked. Try again in {remaining} minutes.")
             return False
 

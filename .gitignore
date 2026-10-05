@@ -38,3 +38,10 @@ maintenance.flag
 
 # Logs
 *.log
+
+# Database backups and migration lock (contain or guard customer data)
+*.bak
+*.migrate.lock
+
+# Test cache
+.pytest_cache/

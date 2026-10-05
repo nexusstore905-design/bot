@@ -1,8 +1,6 @@
 """
-Customer order flow — no pricing shown, per-package supplier routing.
+Customer order flow — optional prices, per-package supplier routing.
 """
-import html
-import json
 import logging
 from telegram import Update
 from telegram.ext import (
@@ -11,6 +9,8 @@ from telegram.ext import (
 )
 
 from database.database import AsyncSessionLocal
+from database.repositories.api_store_repo import UserOrderLimitRepository
+from database.repositories.customer_extras_repo import SavedPlayerIdRepository
 from database.repositories.user_repo import UserRepository
 from database.repositories.product_repo import ProductRepository
 from database.repositories.order_repo import OrderRepository
@@ -18,24 +18,28 @@ from bot.middlewares.auth_middleware import require_auth, require_callback_auth
 from bot.keyboards.customer_kb import (
     main_menu_kb, categories_kb, products_kb, quantity_kb, cart_kb,
     confirm_order_kb, order_status_kb, back_to_menu_kb, my_orders_kb,
+    saved_player_ids_kb,
 )
 from bot.states.states import (
     ORDER_SELECT_CATEGORY, ORDER_SELECT_PRODUCT, ORDER_SELECT_QUANTITY,
     ORDER_CART_ACTION, ORDER_ENTER_PLAYER_ID, ORDER_CONFIRM,
 )
-from bot.keyboards.admin_kb import supplier_done_error_kb
+from services import app_settings
+from services.dispatch import RETRY, SENT, dispatch_order
+from services.messages import is_terminal, item_lines, order_card_text, order_total, status_parts
+from services.notify import notify_admins
+from utils.helpers import format_datetime
 from utils.supplier_routing import resolve_supplier_chat
-from utils.ui import panel
+from utils.ui import DIVIDER, esc, money, panel
 
 logger = logging.getLogger(__name__)
 
-STATUS_DISPLAY = {
-    "pending":    ("⏳", "PENDING",    "Order received, awaiting processing"),
-    "processing": ("⚙️", "PROCESSING", "Your order is being processed"),
-    "completed":  ("✅", "COMPLETED",  "Delivered successfully!"),
-    "failed":     ("❌", "FAILED",     "Issue occurred — contact support"),
-    "cancelled":  ("🚫", "CANCELLED",  "Order was cancelled"),
-}
+ORDER_SESSION_KEYS = ("cart", "temp_item", "player_id", "temp_cat", "order_has_categories")
+
+
+def _clear_order_session(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in ORDER_SESSION_KEYS:
+        context.user_data.pop(key, None)
 
 
 async def _remember_customer_order_message(order_id: str, message_id: int) -> None:
@@ -49,12 +53,16 @@ async def _remember_customer_order_message(order_id: str, message_id: int) -> No
         )
 
 
-def _render_cart(cart: list) -> str:
+def _render_cart(cart: list, show_prices: bool) -> str:
     lines = []
     for i, item in enumerate(cart, 1):
-        lines.append(
-            f"{i}. <b>{html.escape(str(item['product_name']), quote=False)}</b> × {item['quantity']}"
-        )
+        line = f"{i}. <b>{esc(item['product_name'])}</b> × {item['quantity']}"
+        if show_prices and item.get("unit_price") is not None:
+            line += f" — {money(item['unit_price'] * item['quantity'])}"
+        lines.append(line)
+    total = order_total(cart) if show_prices else None
+    if total is not None:
+        lines.append(f"\n💰 <b>Total</b>  {money(total)}")
     return panel("Your cart", "\n".join(lines), icon="🛒")
 
 
@@ -62,32 +70,35 @@ def _order_step(context: ContextTypes.DEFAULT_TYPE, step: int, title: str, promp
     total = 4 if context.user_data.get("order_has_categories") else 3
     return panel(
         "New order",
-        f"<i>Step {step} of {total}</i>\n\n<b>{html.escape(title, quote=False)}</b>\n\n{prompt}",
+        f"<i>Step {step} of {total}</i>\n\n<b>{esc(title)}</b>\n\n{prompt}",
         icon="🛍",
     )
 
 
-async def cb_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_callback_auth(update, context):
-        return ConversationHandler.END
-    await update.callback_query.answer()
+def _review_text(cart: list, player_id: str, show_prices: bool) -> str:
+    return (
+        f"🧾 <b>Review your order</b>\n{DIVIDER}\n"
+        f"{_render_cart(cart, show_prices)}\n"
+        f"🎮 <b>Player ID</b>  <code>{esc(player_id)}</code>\n\n"
+        "Check these details, then submit your order."
+    )
 
-    if "cart" not in context.user_data:
-        context.user_data["cart"] = []
 
+def _valid_player_id(value: str) -> bool:
+    return 3 <= len(value) <= 20 and value.isprintable() and not any(ch.isspace() for ch in value)
+
+
+async def _show_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with AsyncSessionLocal() as session:
         categories = await ProductRepository(session).get_categories()
     # Always show the game/product group first, even when it is the only one.
-    # This keeps the intended flow: PUBG UC Top Up -> choose a UC package.
     context.user_data["order_has_categories"] = True
-
     if not categories:
         await update.callback_query.edit_message_text(
             "😕  <b>No Products Available</b>\n\nCheck back soon!",
             parse_mode="HTML", reply_markup=back_to_menu_kb()
         )
         return ConversationHandler.END
-
     await update.callback_query.edit_message_text(
         _order_step(context, 1, "Choose a product", "Select a product to see its available denominations."),
         reply_markup=categories_kb(categories),
@@ -96,10 +107,16 @@ async def cb_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ORDER_SELECT_CATEGORY
 
 
+async def cb_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_callback_auth(update, context):
+        return ConversationHandler.END
+    context.user_data.setdefault("cart", [])
+    return await _show_categories(update, context)
+
+
 async def cb_select_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
-    await update.callback_query.answer()
     category = update.callback_query.data.split(":", 1)[1]
     context.user_data["temp_cat"] = category
 
@@ -107,13 +124,8 @@ async def cb_select_category(update: Update, context: ContextTypes.DEFAULT_TYPE)
         products = await ProductRepository(session).get_by_category(category)
 
     await update.callback_query.edit_message_text(
-        _order_step(
-            context,
-            2,
-            category,
-            "Choose a package to add it to your cart.",
-        ),
-        reply_markup=products_kb(products),
+        _order_step(context, 2, category, "Choose a package to add it to your cart."),
+        reply_markup=products_kb(products, await app_settings.show_prices()),
         parse_mode="HTML",
     )
     return ORDER_SELECT_PRODUCT
@@ -122,7 +134,6 @@ async def cb_select_category(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def cb_select_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
-    await update.callback_query.answer()
     product_id = int(update.callback_query.data.split(":", 1)[1])
 
     async with AsyncSessionLocal() as session:
@@ -140,15 +151,10 @@ async def cb_select_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "product_id": product.id,
         "product_name": product.name,
         "category": product.category,
+        "unit_price": product.price,
     }
-
     await update.callback_query.edit_message_text(
-        _order_step(
-            context,
-            3,
-            product.name,
-            "Choose how many you want.",
-        ),
+        _order_step(context, 3, product.name, "Choose how many you want."),
         reply_markup=quantity_kb(),
         parse_mode="HTML",
     )
@@ -158,17 +164,16 @@ async def cb_select_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
-    await update.callback_query.answer()
     qty = int(update.callback_query.data.split(":", 1)[1])
 
-    item = context.user_data.pop("temp_item")
+    item = context.user_data.pop("temp_item", None)
+    if item is None:
+        return await _show_categories(update, context)
     item["quantity"] = qty
-    context.user_data["cart"].append(item)
-
-    cart_text = _render_cart(context.user_data["cart"])
+    context.user_data.setdefault("cart", []).append(item)
 
     await update.callback_query.edit_message_text(
-        f"{cart_text}\n"
+        f"{_render_cart(context.user_data['cart'], await app_settings.show_prices())}\n"
         "Choose another product or continue to checkout.",
         parse_mode="HTML",
         reply_markup=cart_kb(context.user_data["cart"]),
@@ -179,24 +184,9 @@ async def cb_select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def cb_back_to_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
-    await update.callback_query.answer()
     category = context.user_data.get("temp_cat")
     if not category:
-        async with AsyncSessionLocal() as session:
-            categories = await ProductRepository(session).get_categories()
-        if not categories:
-            await update.callback_query.edit_message_text(
-                "😕 <b>No products are available right now.</b>",
-                parse_mode="HTML",
-                reply_markup=back_to_menu_kb(),
-            )
-            return ConversationHandler.END
-        await update.callback_query.edit_message_text(
-            _order_step(context, 1, "Choose a product", "Select a product group."),
-            reply_markup=categories_kb(categories),
-            parse_mode="HTML",
-        )
-        return ORDER_SELECT_CATEGORY
+        return await _show_categories(update, context)
 
     async with AsyncSessionLocal() as session:
         products = await ProductRepository(session).get_by_category(category)
@@ -211,7 +201,7 @@ async def cb_back_to_products(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await update.callback_query.edit_message_text(
         _order_step(context, 2, category, "Choose a package to add to your cart."),
-        reply_markup=products_kb(products),
+        reply_markup=products_kb(products, await app_settings.show_prices()),
         parse_mode="HTML",
     )
     return ORDER_SELECT_PRODUCT
@@ -220,7 +210,6 @@ async def cb_back_to_products(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def cb_cart_adjust(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
-    await update.callback_query.answer()
 
     parts = update.callback_query.data.split(":")
     action, index = parts[0], int(parts[1])
@@ -251,7 +240,8 @@ async def cb_cart_adjust(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cart[index]["quantity"] = quantity
 
     await update.callback_query.edit_message_text(
-        f"{_render_cart(cart)}\n\nAdjust quantities, add another package, or continue to checkout.",
+        f"{_render_cart(cart, await app_settings.show_prices())}\n\n"
+        "Adjust quantities, add another package, or continue to checkout.",
         parse_mode="HTML",
         reply_markup=cart_kb(cart),
     )
@@ -266,10 +256,7 @@ async def cb_cart_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_cart_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
-    await update.callback_query.answer()
-    context.user_data["cart"] = []
-    context.user_data.pop("player_id", None)
-    context.user_data.pop("temp_item", None)
+    _clear_order_session(context)
     await update.callback_query.edit_message_text(
         "🗑 <b>Your cart is empty.</b>\n\nYou can start a new order whenever you're ready.",
         parse_mode="HTML",
@@ -278,11 +265,23 @@ async def cb_cart_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def _player_id_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
+    async with AsyncSessionLocal() as session:
+        db_user = await UserRepository(session).get_by_telegram_id(update.effective_user.id)
+        saved = await SavedPlayerIdRepository(session).list(db_user.id) if db_user else []
+    if saved:
+        prompt += "\n\nOr tap one of your recent IDs:"
+    await update.callback_query.edit_message_text(
+        _order_step(context, 4, "Enter your Game Player ID", prompt),
+        parse_mode="HTML",
+        reply_markup=saved_player_ids_kb(saved),
+    )
+    return ORDER_ENTER_PLAYER_ID
+
+
 async def cb_cart_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
-    await update.callback_query.answer()
-
     if not context.user_data.get("cart"):
         await update.callback_query.edit_message_text(
             "🛒 <b>Your cart is empty.</b>\n\nAdd a package before checkout.",
@@ -290,17 +289,41 @@ async def cb_cart_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=back_to_menu_kb(),
         )
         return ConversationHandler.END
+    return await _player_id_prompt(update, context, "Send your Player ID. Check it carefully before submitting.")
 
+
+async def cb_edit_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_callback_auth(update, context):
+        return ConversationHandler.END
+    return await _player_id_prompt(update, context, "Send the correct ID below.")
+
+
+async def cb_use_saved_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_callback_auth(update, context):
+        return ConversationHandler.END
+    saved_id = int(update.callback_query.data.split(":", 1)[1])
+    async with AsyncSessionLocal() as session:
+        db_user = await UserRepository(session).get_by_telegram_id(update.effective_user.id)
+        saved = await SavedPlayerIdRepository(session).get(db_user.id, saved_id) if db_user else None
+    if saved is None or not context.user_data.get("cart"):
+        return await _player_id_prompt(update, context, "That saved ID is gone. Send your Player ID:")
+    context.user_data["player_id"] = saved.player_id
     await update.callback_query.edit_message_text(
-        _order_step(
-            context,
-            4,
-            "Enter your Game Player ID",
-            "Check the ID carefully before submitting.",
-        ),
+        _review_text(context.user_data["cart"], saved.player_id, await app_settings.show_prices()),
+        reply_markup=confirm_order_kb(),
         parse_mode="HTML",
     )
-    return ORDER_ENTER_PLAYER_ID
+    return ORDER_CONFIRM
+
+
+async def cb_forget_player_ids(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_callback_auth(update, context):
+        return ConversationHandler.END
+    async with AsyncSessionLocal() as session:
+        db_user = await UserRepository(session).get_by_telegram_id(update.effective_user.id)
+        if db_user:
+            await SavedPlayerIdRepository(session).clear(db_user.id)
+    return await _player_id_prompt(update, context, "Saved IDs cleared. Send your Player ID:")
 
 
 async def msg_enter_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -320,22 +343,23 @@ async def msg_enter_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ConversationHandler.END
 
     player_id = update.message.text.strip()
-    if len(player_id) < 3 or len(player_id) > 20:
+    if not _valid_player_id(player_id):
         await update.message.reply_text(
             "❌ <b>That Player ID does not look right.</b>\n\n"
-            "Enter a valid Game ID (3-20 characters). Please try again:",
+            "Enter a valid Game ID (3-20 characters, no spaces). Please try again:",
             parse_mode="HTML",
         )
         return ORDER_ENTER_PLAYER_ID
+    if not context.user_data.get("cart"):
+        await update.message.reply_text(
+            "❌ <b>Your order session expired.</b>\n\nStart a new order from the menu.",
+            parse_mode="HTML", reply_markup=back_to_menu_kb(),
+        )
+        return ConversationHandler.END
 
     context.user_data["player_id"] = player_id
-    cart_text = _render_cart(context.user_data["cart"])
-
     await update.message.reply_text(
-        "🧾 <b>Review your order</b>\n──────────────\n"
-        f"{cart_text}\n"
-        f"🎮 <b>Player ID</b>  <code>{html.escape(player_id, quote=False)}</code>\n\n"
-        "Check these details, then submit your order.",
+        _review_text(context.user_data["cart"], player_id, await app_settings.show_prices()),
         reply_markup=confirm_order_kb(),
         parse_mode="HTML",
     )
@@ -345,7 +369,6 @@ async def msg_enter_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
-    await update.callback_query.answer()
     user = update.effective_user
     cart = context.user_data.get("cart", [])
     player_id = context.user_data.get("player_id")
@@ -358,8 +381,9 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
+    # Removing the keyboard first also stops double submissions.
     await update.callback_query.message.edit_text(
-        "⏳ <b>Checking your order…</b>\n──────────────\n\n"
+        f"⏳ <b>Checking your order…</b>\n{DIVIDER}\n\n"
         "Confirming package availability and supplier routing.",
         parse_mode="HTML",
     )
@@ -389,6 +413,7 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "product_name": product.name,
                 "category": product.category,
                 "quantity": quantity,
+                "unit_price": product.price,
             }
             normalized_cart.append(normalized)
             target_chat, _ = resolve_supplier_chat(product.supplier_chat_id)
@@ -409,21 +434,18 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 })
 
         if not unavailable_products and not missing_products:
-            from database.repositories.api_store_repo import UserOrderLimitRepository
-            limit_repo = UserOrderLimitRepository(session)
-            allowed, reason = await limit_repo.check_and_increment(user.id)
+            allowed, reason = await UserOrderLimitRepository(session).check_and_increment(user.id)
             if not allowed:
                 limit_error = reason
             else:
                 db_user = await UserRepository(session).get_by_telegram_id(user.id)
-                repo = OrderRepository(session)
-                order = await repo.create_cart(
+                order = await OrderRepository(session).create_order(
                     user_id=db_user.id,
-                    cart_items=normalized_cart,
+                    items=normalized_cart,
                     player_id=player_id,
-                    supplier_fulfillments=fulfillment_specs,
+                    fulfillments=fulfillment_specs,
                 )
-                order = await repo.get_by_order_id(order.order_id)
+                await SavedPlayerIdRepository(session).remember(db_user.id, player_id)
 
     if unavailable_products:
         await update.callback_query.edit_message_text(
@@ -434,9 +456,9 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     if missing_products:
-        product_list = ", ".join(html.escape(name, quote=False) for name in missing_products)
-        await _notify_admins(
-            context,
+        product_list = ", ".join(esc(name) for name in missing_products)
+        await notify_admins(
+            context.bot,
             "⚠️ <b>ORDER BLOCKED: SUPPLIER NOT CONFIGURED</b>\n\n"
             f"Customer: <code>{user.id}</code>\nPackage(s): {product_list}\n"
             "No order was created. Configure a supplier destination for each package and ask the customer to try again.",
@@ -452,7 +474,7 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if limit_error:
         await update.callback_query.edit_message_text(
-            f"🚫 <b>Order limit reached</b>\n\n{html.escape(limit_error, quote=False)}",
+            f"🚫 <b>Order limit reached</b>\n\n{esc(limit_error)}",
             parse_mode="HTML",
             reply_markup=back_to_menu_kb(),
         )
@@ -466,190 +488,103 @@ async def cb_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    context.user_data.pop("cart", None)
-    context.user_data.pop("player_id", None)
+    _clear_order_session(context)
     order_id = order.order_id
-    safe_order_id = html.escape(order_id, quote=False)
-    lines = "\n".join(
-        f"• {html.escape(item['product_name'], quote=False)} × {item['quantity']}"
-        for item in normalized_cart
-    )
-    dispatching_text = (
-        "⏳ <b>Order received</b>\n──────────────\n\n"
-        f"🧾 <b>Order ID</b>  <code>{safe_order_id}</code>\n"
-        f"{lines}\n\n"
-        "Sending your order to the supplier groups now…"
-    )
-    await update.callback_query.edit_message_text(dispatching_text, parse_mode="HTML")
-
-    delivery_failures = await _forward_to_suppliers(context, order)
-    async with AsyncSessionLocal() as session:
-        repo = OrderRepository(session)
-        final_order = await repo.get_by_order_id(order_id)
-        status_value = final_order.status.value if final_order else "pending"
-    status_icon, status_label, _ = STATUS_DISPLAY.get(status_value, ("❓", status_value.upper(), ""))
-
-    if delivery_failures:
-        result_text = (
-            "⚠️ <b>Order saved, but delivery needs attention</b>\n──────────────\n\n"
-            f"🧾 <b>Order ID</b>  <code>{safe_order_id}</code>\n"
-            f"{lines}\n\n"
-            "The administrator has been notified about the supplier delivery issue. "
-            f"Please don’t submit the order again; use Refresh status to follow it.\n\n{status_icon} Status: <b>{status_label}</b>"
-        )
-    else:
-        result_text = (
-            "✅ <b>Order sent to suppliers</b>\n──────────────\n\n"
-            f"🧾 <b>Order ID</b>  <code>{safe_order_id}</code>\n"
-            f"{lines}\n\n"
-            f"{status_icon} Status: <b>{status_label}</b>\n\n"
-            "We’ll message you when all supplier groups finish processing it."
-        )
-    await update.callback_query.message.edit_text(
-        result_text,
-        reply_markup=order_status_kb(order_id),
+    await update.callback_query.edit_message_text(
+        f"⏳ <b>Order received</b>\n{DIVIDER}\n\n"
+        f"🧾 <b>Order ID</b>  <code>{esc(order_id)}</code>\n"
+        f"{item_lines(normalized_cart, False)}\n\n"
+        "Sending your order to the supplier groups now…",
         parse_mode="HTML",
     )
-    await _remember_customer_order_message(
-        order_id, update.callback_query.message.message_id,
-    )
+    await _remember_customer_order_message(order_id, update.callback_query.message.message_id)
 
+    outcomes = await dispatch_order(context.bot, order.id)
+    async with AsyncSessionLocal() as session:
+        final_order = await OrderRepository(session).get_by_order_id(order_id)
+    show_prices = await app_settings.show_prices()
+    retrying = [outcome.category for outcome in outcomes if outcome.result == RETRY]
+    if retrying:
+        title = "⏳ <b>Order saved — delivery is being retried</b>"
+        footer = (
+            f"\n\nWe couldn’t reach the supplier for {esc(', '.join(retrying))} yet and will keep trying "
+            "automatically. Please don’t submit the order again; you’ll get a message here."
+        )
+    elif all(outcome.result == SENT for outcome in outcomes):
+        title = "✅ <b>Order sent to suppliers</b>"
+        footer = "\n\nWe’ll message you when all supplier groups finish processing it."
+    else:
+        title = "⚠️ <b>Order saved, but delivery needs attention</b>"
+        footer = "\n\nThe administrator has been notified. Please don’t submit the order again."
+    await update.callback_query.message.edit_text(
+        order_card_text(final_order, show_prices, title=title) + footer,
+        reply_markup=order_status_kb(order_id, terminal=is_terminal(final_order)),
+        parse_mode="HTML",
+    )
     return ConversationHandler.END
 
 
-async def cb_edit_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cb_reorder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Load a previous order's packages and player ID into a new checkout."""
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text(
-        _order_step(
-            context,
-            4,
-            "Enter your Game Player ID",
-            "Send the correct ID below.",
-        ),
-        parse_mode="HTML",
-    )
-    return ORDER_ENTER_PLAYER_ID
+    order_id = update.callback_query.data.split(":", 1)[1]
+    cart: list[dict] = []
+    skipped: list[str] = []
+    async with AsyncSessionLocal() as session:
+        db_user = await UserRepository(session).get_by_telegram_id(update.effective_user.id)
+        order = await OrderRepository(session).get_by_order_id(order_id)
+        if not db_user or not order or order.user_id != db_user.id:
+            order = None
+        else:
+            products = ProductRepository(session)
+            for item in order.items:
+                product = await products.get_by_id(item.product_id) if item.product_id else None
+                if product is None or not product.is_active:
+                    skipped.append(item.product_name)
+                    continue
+                cart.append({
+                    "product_id": product.id,
+                    "product_name": product.name,
+                    "category": product.category,
+                    "quantity": item.quantity,
+                    "unit_price": product.price,
+                })
+    if order is None:
+        await update.callback_query.edit_message_text(
+            "⚠️ <b>That order could not be found.</b>", parse_mode="HTML", reply_markup=back_to_menu_kb(),
+        )
+        return ConversationHandler.END
+    if not cart:
+        await update.callback_query.edit_message_text(
+            "😕 <b>Those packages are no longer available.</b>\n\nStart a new order from the menu.",
+            parse_mode="HTML", reply_markup=back_to_menu_kb(),
+        )
+        return ConversationHandler.END
+
+    _clear_order_session(context)
+    context.user_data["cart"] = cart
+    context.user_data["player_id"] = order.player_id
+    context.user_data["order_has_categories"] = True
+    text = _review_text(cart, order.player_id, await app_settings.show_prices())
+    if skipped:
+        text += f"\n\n<i>No longer available, left out: {esc(', '.join(skipped))}</i>"
+    await update.callback_query.edit_message_text(text, reply_markup=confirm_order_kb(), parse_mode="HTML")
+    return ORDER_CONFIRM
 
 
 async def cb_reset_order_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear the current product selection and return to the product groups."""
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
-    await update.callback_query.answer()
+    _clear_order_session(context)
     context.user_data["cart"] = []
-    context.user_data.pop("player_id", None)
-    context.user_data.pop("temp_item", None)
-    context.user_data.pop("temp_cat", None)
-    async with AsyncSessionLocal() as session:
-        categories = await ProductRepository(session).get_categories()
-    context.user_data["order_has_categories"] = True
-    if not categories:
-        await update.callback_query.edit_message_text(
-            "😕  <b>No Products Available</b>\n\nCheck back soon!",
-            parse_mode="HTML", reply_markup=back_to_menu_kb()
-        )
-        return ConversationHandler.END
-    await update.callback_query.edit_message_text(
-        _order_step(context, 1, "Choose a product", "Select a product to see its available denominations."),
-        reply_markup=categories_kb(categories),
-        parse_mode="HTML",
-    )
-    return ORDER_SELECT_CATEGORY
-
-
-async def _notify_admins(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
-    from config.settings import ADMIN_IDS
-    for admin_id in ADMIN_IDS:
-        try:
-            await context.bot.send_message(chat_id=admin_id, text=text, parse_mode="HTML")
-        except Exception:
-            logger.exception("Could not notify admin %s about order delivery", admin_id)
-
-
-async def _forward_to_suppliers(context: ContextTypes.DEFAULT_TYPE, order) -> list[str]:
-    """Dispatch each persisted supplier part and record its own delivery result."""
-    failures: list[str] = []
-    supplier_message_saved = bool(order.supplier_msg_id)
-    for fulfillment in order.fulfillments:
-        if fulfillment.status.value != "queued":
-            continue
-        async with AsyncSessionLocal() as session:
-            repo = OrderRepository(session)
-            if not await repo.mark_fulfillment_sending(fulfillment.id):
-                continue
-        items = json.loads(fulfillment.items_snapshot)
-        safe_order_id = html.escape(order.order_id, quote=False)
-        safe_category = html.escape(fulfillment.category, quote=False)
-        supplier_text = (
-            "🆕 <b>New order</b>\n──────────────\n"
-            f"🧾 <b>Order ID</b>  <code>{safe_order_id}</code>\n"
-            f"📂 <b>Product group</b>  {safe_category}\n"
-            f"🎮 <b>Player ID</b>  <code>{html.escape(order.player_id, quote=False)}</code>\n\n"
-            "<b>Items</b>\n"
-        )
-        supplier_text += "".join(
-            f"• {html.escape(str(item['product_name']), quote=False)} × {int(item['quantity'])}\n"
-            for item in items
-        )
-        supplier_text += "\nMark this group’s items as <b>DONE</b> or <b>ERROR</b>:"
-        try:
-            message = await context.bot.send_message(
-                chat_id=fulfillment.supplier_chat_id,
-                text=supplier_text,
-                parse_mode="HTML",
-                reply_markup=supplier_done_error_kb(order.order_id, fulfillment.id),
-            )
-            async with AsyncSessionLocal() as session:
-                repo = OrderRepository(session)
-                await repo.set_fulfillment_dispatched(fulfillment.id, message.message_id)
-                if not supplier_message_saved:
-                    saved_order = await repo.get_by_order_id(order.order_id)
-                    if saved_order:
-                        await repo.set_supplier_msg(saved_order, message.message_id)
-                        supplier_message_saved = True
-            logger.info(
-                "Delivered order %s group %s to supplier chat %s",
-                order.order_id, fulfillment.category, fulfillment.supplier_chat_id,
-            )
-        except Exception as exc:
-            safe_error = html.escape(str(exc), quote=False)
-            async with AsyncSessionLocal() as session:
-                repo = OrderRepository(session)
-                failure_recorded = await repo.set_fulfillment_failed(fulfillment.id, str(exc))
-                await repo.refresh_order_status_from_fulfillments(
-                    order.id,
-                    changed_by="supplier_dispatch",
-                    note=f"Delivery failed for {fulfillment.category}: {type(exc).__name__}",
-                )
-            if failure_recorded:
-                failures.append(fulfillment.category)
-                await _notify_admins(
-                    context,
-                    "⚠️ <b>SUPPLIER DELIVERY FAILED</b>\n\n"
-                    f"Order: <code>{safe_order_id}</code>\n"
-                    f"Product group: {safe_category}\n"
-                    f"Supplier chat: <code>{fulfillment.supplier_chat_id}</code>\n"
-                    f"Error: <code>{safe_error}</code>\n\nPlease contact the customer and arrange manual fulfillment.",
-                )
-
-    async with AsyncSessionLocal() as session:
-        await OrderRepository(session).refresh_order_status_from_fulfillments(
-            order.id,
-            changed_by="supplier_dispatch",
-            note="Supplier dispatch completed.",
-        )
-    return failures
+    return await _show_categories(update, context)
 
 
 async def cb_return_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    context.user_data.pop("cart", None)
-    context.user_data.pop("temp_item", None)
-    context.user_data.pop("player_id", None)
-    context.user_data.pop("temp_cat", None)
-    context.user_data.pop("order_has_categories", None)
+    _clear_order_session(context)
     await update.callback_query.edit_message_text(
         "🏠 <b>Main menu</b>\n\nYour unfinished cart was cleared.",
         parse_mode="HTML",
@@ -661,21 +596,18 @@ async def cb_return_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer("Order cancelled")
-    context.user_data.pop("cart", None)
-    context.user_data.pop("temp_item", None)
-    context.user_data.pop("player_id", None)
-    context.user_data.pop("temp_cat", None)
-    context.user_data.pop("order_has_categories", None)
-    message = update.callback_query.message if update.callback_query else update.message
+    _clear_order_session(context)
     text = "✖ <b>Order cancelled</b>\n\nYour cart has been cleared. You can start again anytime."
     if update.callback_query:
         await update.callback_query.edit_message_text(
             text, parse_mode="HTML", reply_markup=main_menu_kb()
         )
     else:
-        await message.reply_text(text, parse_mode="HTML", reply_markup=main_menu_kb())
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=main_menu_kb())
     return ConversationHandler.END
 
+
+# ─── Order history ────────────────────────────────────────────────────
 
 async def cmd_my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _show_my_orders(update, context, page=0, from_callback=False)
@@ -704,15 +636,15 @@ async def _show_my_orders(
         orders = await repo.get_by_user(db_user.id, limit=page_size, offset=page * page_size)
 
     if not orders:
-        text = "📭 <b>No orders yet</b>\n──────────────\n\nPlace your first order from the main menu."
+        text = f"📭 <b>No orders yet</b>\n{DIVIDER}\n\nPlace your first order from the main menu."
         markup = back_to_menu_kb()
     else:
-        lines = [f"📦 <b>Your orders</b> · Page {page + 1} of {page_count}", "──────────────", ""]
+        lines = [f"📦 <b>Your orders</b> · Page {page + 1} of {page_count}", DIVIDER, ""]
         for order in orders:
-            icon, label, _ = STATUS_DISPLAY.get(order.status.value, ("❓", order.status.value, ""))
-            lines.append(f"{icon} <b>{html.escape(order.order_id, quote=False)}</b> · {label}")
+            icon, label, _ = status_parts(order.status.value)
+            lines.append(f"{icon} <b>{esc(order.order_id)}</b> · {label}")
             product_summaries = [
-                f"{html.escape(item.product_name[:32], quote=False)} × {item.quantity}"
+                f"{esc(item.product_name[:32])} × {item.quantity}"
                 for item in order.items[:2]
             ]
             if len(order.items) > 2:
@@ -743,95 +675,78 @@ async def cb_my_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _show_my_orders(update, context, page=page, from_callback=True)
 
 
-async def cb_view_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_callback_auth(update, context):
-        return
-    _, order_id, page_value = update.callback_query.data.split(":", 2)
-    page = max(0, int(page_value))
+async def _show_own_order(update: Update, order_id: str, page: int) -> None:
     async with AsyncSessionLocal() as session:
         db_user = await UserRepository(session).get_by_telegram_id(update.effective_user.id)
         order = await OrderRepository(session).get_by_order_id(order_id)
         if not db_user or not order or order.user_id != db_user.id:
             order = None
     if order is None:
-        await update.callback_query.message.edit_text(
-            "⚠️ <b>That order could not be found.</b>",
-            parse_mode="HTML",
-            reply_markup=my_orders_kb([], page, 0),
-        )
-        return
-    icon, label, desc = STATUS_DISPLAY.get(order.status.value, ("❓", order.status.value, ""))
-    item_lines = "\n".join(
-        f"• {html.escape(item.product_name, quote=False)} × {item.quantity}"
-        for item in order.items
-    ) or "• Order details unavailable"
-    text = (
-        "🔎 <b>Order details</b>\n──────────────\n\n"
-        f"🧾 <b>Order ID</b>  <code>{html.escape(order.order_id, quote=False)}</code>\n"
-        f"{icon} <b>{label}</b> · {desc}\n\n"
-        f"<b>Items</b>\n{item_lines}\n\n"
-        f"🎮 <b>Player ID</b>  <code>{html.escape(order.player_id, quote=False)}</code>"
-    )
-    await update.callback_query.edit_message_text(
-        text, parse_mode="HTML", reply_markup=order_status_kb(order_id, page)
-    )
-    await _remember_customer_order_message(
-        order_id, update.callback_query.message.message_id,
-    )
-
-
-async def cb_refresh_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_callback_auth(update, context):
-        return
-    parts = update.callback_query.data.split(":")
-    order_id = parts[1]
-    page = max(0, int(parts[2])) if len(parts) > 2 else 0
-
-    async with AsyncSessionLocal() as session:
-        user_repo = UserRepository(session)
-        user = await user_repo.get_by_telegram_id(update.effective_user.id)
-        repo = OrderRepository(session)
-        order = await repo.get_by_order_id(order_id)
-        if not user or not order or order.user_id != user.id:
-            order = None
-
-    if not order:
         await update.callback_query.edit_message_text(
             "⚠️ <b>That order could not be found.</b>",
             parse_mode="HTML",
             reply_markup=my_orders_kb([], page, 0),
         )
         return
-
-    icon, label, desc = STATUS_DISPLAY.get(order.status.value, ("❓", order.status.value, ""))
-    items = "\n".join(
-        f"• {html.escape(item.product_name, quote=False)} × {item.quantity}"
-        for item in order.items
-    ) or "• Order details unavailable"
     await update.callback_query.edit_message_text(
-        "🔎 <b>Order details</b>\n──────────────\n\n"
-        f"🧾 <b>Order ID</b>  <code>{html.escape(order.order_id, quote=False)}</code>\n"
-        f"{icon} <b>{label}</b>\n"
-        f"📝 {desc}\n\n<b>Items</b>\n{items}\n\n"
-        f"🎮 <b>Player ID</b>  <code>{html.escape(order.player_id, quote=False)}</code>",
-        reply_markup=order_status_kb(order_id, page),
+        order_card_text(order, await app_settings.show_prices()),
         parse_mode="HTML",
+        reply_markup=order_status_kb(order_id, page, terminal=is_terminal(order)),
     )
-    await _remember_customer_order_message(
-        order_id, update.callback_query.message.message_id,
+    await _remember_customer_order_message(order_id, update.callback_query.message.message_id)
+
+
+async def cb_view_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_callback_auth(update, context):
+        return
+    _, order_id, page_value = update.callback_query.data.split(":", 2)
+    await _show_own_order(update, order_id, max(0, int(page_value)))
+
+
+async def cb_refresh_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_callback_auth(update, context):
+        return
+    parts = update.callback_query.data.split(":")
+    page = max(0, int(parts[2])) if len(parts) > 2 else 0
+    await _show_own_order(update, parts[1], page)
+
+
+async def cb_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_callback_auth(update, context):
+        return
+    async with AsyncSessionLocal() as session:
+        db_user = await UserRepository(session).get_by_telegram_id(update.effective_user.id)
+        balance = await OrderRepository(session).unsettled_balance_by_user(db_user.id) if db_user else None
+    if balance is None:
+        await update.callback_query.edit_message_text("🔐 Please /start to sign in first.")
+        return
+    lines = [f"Completed orders awaiting payment: <b>{balance['orders']}</b>"]
+    if await app_settings.show_prices() and balance["orders"]:
+        lines.append(f"Amount due: <b>{money(balance['total'])}</b>")
+        if balance["unpriced_lines"]:
+            lines.append(f"<i>{balance['unpriced_lines']} package line(s) have no price and are not included.</i>")
+    last = balance["last_settled_at"]
+    lines.append(f"Last payment cleared: {format_datetime(last) if last else 'never'}")
+    await update.callback_query.edit_message_text(
+        panel("Your balance", "\n".join(lines), icon="💰"),
+        parse_mode="HTML",
+        reply_markup=back_to_menu_kb(),
     )
 
 
 def get_order_conversation() -> ConversationHandler:
-    from telegram.ext import ConversationHandler
     return ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_order_start, pattern=r"^order_start$")],
+        entry_points=[
+            CallbackQueryHandler(cb_order_start, pattern=r"^order_start$"),
+            CallbackQueryHandler(cb_reorder, pattern=r"^reorder:"),
+        ],
         states={
             ORDER_SELECT_CATEGORY: [
                 CallbackQueryHandler(cb_select_category, pattern=r"^cat:"),
             ],
             ORDER_SELECT_PRODUCT: [
                 CallbackQueryHandler(cb_select_product, pattern=r"^prod:"),
+                CallbackQueryHandler(cb_order_start, pattern=r"^order_start$"),
             ],
             ORDER_SELECT_QUANTITY: [
                 CallbackQueryHandler(cb_select_quantity, pattern=r"^qty:"),
@@ -846,6 +761,8 @@ def get_order_conversation() -> ConversationHandler:
             ],
             ORDER_ENTER_PLAYER_ID: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, msg_enter_player_id),
+                CallbackQueryHandler(cb_use_saved_player_id, pattern=r"^use_pid:\d+$"),
+                CallbackQueryHandler(cb_forget_player_ids, pattern=r"^forget_pids$"),
             ],
             ORDER_CONFIRM: [
                 CallbackQueryHandler(cb_confirm_order, pattern=r"^confirm_order$"),
