@@ -6,6 +6,7 @@ from config.settings import SUPPLIER_TIMEOUT_MINUTES
 from database.database import AsyncSessionLocal
 from database.models import OrderStatus
 from database.repositories.order_repo import OrderRepository
+from services.messages import supplier_notice
 from services.notify import announce_order_status, close_supplier_message, notify_team
 from utils.helpers import utcnow
 from utils.ui import esc
@@ -24,10 +25,9 @@ async def expire_stale_orders(bot) -> int:
     minutes = SUPPLIER_TIMEOUT_MINUTES
     summary_lines = []
     for info in expired:
-        supplier_text = (
-            "⏱️ <b>ORDER PART CLOSED — SUPPLIER TIMEOUT</b>\n\n"
-            f"Order <code>{esc(info.order_id)}</code> was not answered within {minutes} minutes.\n"
-            "Please do not process it."
+        supplier_text = supplier_notice(
+            "⏱️", "CLOSED — NO RESPONSE", info.order_id,
+            f"Not answered within {minutes} min.\n🚫 <b>Do not process this order.</b>",
         )
         for chat_id, message_id in info.timed_out_messages:
             await close_supplier_message(bot, chat_id, message_id, supplier_text)

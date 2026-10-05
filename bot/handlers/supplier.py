@@ -17,12 +17,28 @@ from database.models import (
     SupplierFulfillmentStatus,
 )
 from database.repositories.order_repo import OrderRepository
-from services.messages import supplier_closed_text
+from services.messages import pkt_clock, supplier_closed_text
 from services.notify import announce_order_status, notify_team
+from utils.helpers import utcnow
 from utils.supplier_routing import resolve_supplier_chat
 from utils.ui import esc
 
 logger = logging.getLogger(__name__)
+
+
+def outcome_footer(status: SupplierFulfillmentStatus, supplier_user, order_status: OrderStatus) -> str:
+    """The closing line on a supplier task card: who did what, when, and where the order stands."""
+    who = esc(supplier_user.full_name or supplier_user.id)
+    when = pkt_clock(utcnow())
+    if status == SupplierFulfillmentStatus.completed:
+        line = f"✅ <b>DONE</b>  ·  {who}  ·  {when} PKT"
+    else:
+        line = f"❌ <b>ERROR REPORTED</b>  ·  {who}  ·  {when} PKT"
+    if order_status == OrderStatus.completed:
+        return f"{line}\n🎉 Whole order completed — customer notified."
+    if order_status == OrderStatus.failed:
+        return f"{line}\n🛟 Order needs support — the team has been alerted."
+    return f"{line}\n⏳ Other supplier groups are still working on this order."
 
 
 async def _expected_legacy_chats(session, order_id: int) -> set[int]:
@@ -163,7 +179,7 @@ async def handle_supplier_message(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(result["message"], parse_mode="HTML")
         return
     await update.message.reply_text(
-        f"✅ Supplier task for <code>{esc(order_id)}</code> marked <b>{status.value.upper()}</b>.",
+        f"🧾 <code>{esc(order_id)}</code>\n" + outcome_footer(status, update.effective_user, result["order_status"]),
         parse_mode="HTML",
     )
     await _after_supplier_action(context, result)
@@ -193,12 +209,7 @@ async def cb_supplier_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.message.reply_text(result["message"], parse_mode="HTML")
         return
 
-    icon = "✅" if status == SupplierFulfillmentStatus.completed else "❌"
-    footer = f"{icon} <b>This group marked {status.value.upper()}</b> by {esc(update.effective_user.full_name or update.effective_user.id)}"
-    if result["order_status"] in (OrderStatus.completed, OrderStatus.failed):
-        footer += f"\nOverall order: <b>{result['order_status'].value.upper()}</b>"
-    else:
-        footer += "\nOther supplier groups are still processing."
+    footer = outcome_footer(status, update.effective_user, result["order_status"])
     # text_html keeps the original formatting escaped, so names like "a<b" cannot break the edit.
     try:
         await query.message.edit_text(

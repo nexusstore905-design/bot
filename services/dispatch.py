@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass
 
 from bot.keyboards.admin_kb import supplier_done_error_kb
+from config.settings import SUPPLIER_TIMEOUT_MINUTES
 from database.database import AsyncSessionLocal
 from database.repositories.order_repo import MAX_DISPATCH_ATTEMPTS, OrderRepository
 from services.messages import supplier_order_text
@@ -38,15 +39,18 @@ async def dispatch_fulfillment(bot, fulfillment_id: int) -> DispatchOutcome:
         part = await repo.get_fulfillment_by_id(fulfillment_id)
         order = part.order
         order_pk, order_id = order.id, order.order_id
-        chat_id, category = part.supplier_chat_id, part.category
-        text = supplier_order_text(order_id, category, order.player_id, json.loads(part.items_snapshot))
+        chat_id, category, player_id = part.supplier_chat_id, part.category, order.player_id
+        text = supplier_order_text(
+            order_id, category, player_id, json.loads(part.items_snapshot),
+            created_at=order.created_at, timeout_minutes=SUPPLIER_TIMEOUT_MINUTES,
+        )
 
     try:
         message = await bot.send_message(
             chat_id=chat_id,
             text=text,
             parse_mode="HTML",
-            reply_markup=supplier_done_error_kb(order_id, fulfillment_id),
+            reply_markup=supplier_done_error_kb(order_id, fulfillment_id, player_id),
         )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"[:300]

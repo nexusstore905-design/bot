@@ -58,9 +58,19 @@ def test_supplier_button_handles_special_characters_and_notifies_customer():
     bot = FakeBot()
     run(dispatch_order(bot, order.id))
     part_id = sql("SELECT id FROM supplier_fulfillments")[0][0]
+
+    # The delivered card: player ID as its own copyable block, plus a one-tap copy button.
+    delivered = bot.sent_to(SUPPLIER_A)[0]
+    assert "<pre>a&lt;b&amp;c</pre>" in delivered["text"]
+    assert "⏳ Respond within 10 min" in delivered["text"]
+    keyboard = delivered["reply_markup"].inline_keyboard
+    assert keyboard[0][0].copy_text.text == "a<b&c"
+    assert [button.text for button in keyboard[1]] == ["✅  Done", "❌  Error"]
+
     # What Telegram returns as text_html for the delivered message (entities escaped).
-    message_html = supplier_order_text(order.order_id, "UC", "a<b&c", [{"product_name": "UC pack", "quantity": 1}])
-    assert "a&lt;b&amp;c" in message_html
+    message_html = supplier_order_text(
+        order.order_id, "UC", "a<b&c", [{"product_name": "UC pack", "quantity": 1}], timeout_minutes=10,
+    )
 
     message = FakeTelegramMessage(SUPPLIER_A, text_html=message_html)
     update = SimpleNamespace(
@@ -72,7 +82,9 @@ def test_supplier_button_handles_special_characters_and_notifies_customer():
     edited_text, kwargs = message.edits[0]
     assert "a&lt;b&amp;c" in edited_text and "a<b" not in edited_text
     assert kwargs["parse_mode"] == "HTML" and kwargs["reply_markup"] is None
-    assert "Mark this group" not in edited_text
+    assert "Respond within" not in edited_text and "Tap ✅ Done" not in edited_text
+    assert "✅ <b>DONE</b>  ·  Supplier Sam" in edited_text and "Whole order completed" in edited_text
+    assert "<pre>a&lt;b&amp;c</pre>" in edited_text  # details stay for the supplier's records
     assert sql("SELECT status FROM orders")[0][0] == "completed"
     assert any("complete" in m["text"] for m in bot.sent_to(111))
 

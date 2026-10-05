@@ -21,6 +21,7 @@ from database.models import (
 from database.repositories.order_repo import OrderRepository
 from services.audit import audit
 from services.dispatch import FAILED, RETRY, SENT, dispatch_order
+from services.messages import supplier_notice
 from services.notify import announce_order_status, close_supplier_message
 from utils.ui import esc
 
@@ -181,8 +182,10 @@ async def cb_set_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for chat_id, message_id in closed_messages:
             await close_supplier_message(
                 context.bot, chat_id, message_id,
-                f"🛑 <b>Order <code>{esc(order_id)}</code> was closed by an admin</b> "
-                f"({new_status.value}). No further action is needed.",
+                supplier_notice(
+                    "🛑", f"CLOSED BY ADMIN · {new_status.value.upper()}", order_id,
+                    "No further action is needed for this order.",
+                ),
             )
         await audit(update.effective_user, "set_order_status", f"{order_id} → {new_status.value}")
         await announce_order_status(context.bot, order_id)
@@ -206,7 +209,10 @@ async def _resend(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: 
     for chat_id, message_id in old_messages:
         await close_supplier_message(
             context.bot, chat_id, message_id,
-            f"♻️ <b>Order <code>{esc(order_id)}</code> was re-sent</b>. Use the new message instead.",
+            supplier_notice(
+                "♻️", "RE-SENT", order_id,
+                "This card is replaced — use the newest message for this order.",
+            ),
         )
     outcomes = await dispatch_order(context.bot, order_pk)
     sent = sum(1 for outcome in outcomes if outcome.result == SENT)

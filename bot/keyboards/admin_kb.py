@@ -1,5 +1,5 @@
 """Inline menus shown in the admin control panel."""
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
 
 
 def admin_main_kb(is_owner: bool = True) -> InlineKeyboardMarkup:
@@ -250,12 +250,19 @@ def admin_order_actions_kb(order_id: str, is_open: bool, can_resend: bool) -> In
     return InlineKeyboardMarkup(rows)
 
 
-def supplier_done_error_kb(order_id: str, fulfillment_id: int | None = None) -> InlineKeyboardMarkup:
+def supplier_done_error_kb(
+    order_id: str, fulfillment_id: int | None = None, player_id: str | None = None,
+) -> InlineKeyboardMarkup:
     action_suffix = f"{order_id}:{fulfillment_id}" if fulfillment_id is not None else order_id
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅  DONE",   callback_data=f"sup_done:{action_suffix}"),
-        InlineKeyboardButton("❌  ERROR",  callback_data=f"sup_error:{action_suffix}"),
-    ]])
+    rows = []
+    if player_id:
+        # One tap copies the ID to the clipboard (Telegram copy button, max 256 chars).
+        rows.append([InlineKeyboardButton("📋  Copy Player ID", copy_text=CopyTextButton(player_id[:256]))])
+    rows.append([
+        InlineKeyboardButton("✅  Done", callback_data=f"sup_done:{action_suffix}"),
+        InlineKeyboardButton("❌  Error", callback_data=f"sup_error:{action_suffix}"),
+    ])
+    return InlineKeyboardMarkup(rows)
 
 
 def api_stores_kb() -> InlineKeyboardMarkup:

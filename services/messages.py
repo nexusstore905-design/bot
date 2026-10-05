@@ -9,7 +9,7 @@ from database.models import (
     OrderStatus,
     SupplierFulfillmentStatus,
 )
-from utils.ui import DIVIDER, esc, progress_bar, quote
+from utils.ui import esc, progress_bar, quote
 
 PAKISTAN_TZ = ZoneInfo("Asia/Karachi")
 
@@ -21,7 +21,8 @@ STATUS_ICONS = {
     "cancelled": "🚫",
 }
 
-SUPPLIER_ACTION_PROMPT = "Mark this group’s items as"
+SUPPLIER_DIVIDER = "━━━━━━━━━━━━━━━━"
+SUPPLIER_ACTION_MARKER = "⏳ Respond within"
 TIMELINE_STEPS = 4
 
 
@@ -29,7 +30,7 @@ def status_label(status_value: str, lang: str | None) -> str:
     return f"{STATUS_ICONS.get(status_value, '❓')} {t(lang, 'st_' + status_value)}"
 
 
-def _clock(value) -> str:
+def pkt_clock(value) -> str:
     if value is None:
         return ""
     if value.tzinfo is None:
@@ -47,10 +48,10 @@ def order_timeline(order, lang: str | None) -> tuple[list[str], int]:
         and part.dispatch_attempts > 0
         for part in parts
     )
-    lines = [f"✅ {t(lang, 'tl_placed')} · {_clock(order.created_at)}"]
+    lines = [f"✅ {t(lang, 'tl_placed')} · {pkt_clock(order.created_at)}"]
     done = 1
     if sent:
-        when = f" · {_clock(min(dispatched))}" if dispatched else ""
+        when = f" · {pkt_clock(min(dispatched))}" if dispatched else ""
         lines.append(f"✅ {t(lang, 'tl_sent')}{when}")
         done = 2
     elif retrying:
@@ -59,7 +60,7 @@ def order_timeline(order, lang: str | None) -> tuple[list[str], int]:
         lines.append(f"⏳ {t(lang, 'tl_sent')}")
 
     if order.status == OrderStatus.completed:
-        lines.append(f"✅ {t(lang, 'tl_delivered')} · {_clock(order.updated_at)}")
+        lines.append(f"✅ {t(lang, 'tl_delivered')} · {pkt_clock(order.updated_at)}")
         done = TIMELINE_STEPS
     elif order.status == OrderStatus.failed:
         lines.append(f"❌ {t(lang, 'tl_failed')}")
@@ -112,26 +113,48 @@ def is_terminal(order) -> bool:
     return order.status in TERMINAL_ORDER_STATUSES
 
 
-def supplier_order_text(order_id: str, category: str, player_id: str, items: list[dict]) -> str:
-    text = (
-        f"🆕 <b>New order</b>\n{DIVIDER}\n"
-        f"🧾 <b>Order ID</b>  <code>{esc(order_id)}</code>\n"
-        f"📂 <b>Product group</b>  {esc(category)}\n"
-        f"🎮 <b>Player ID</b>  <code>{esc(player_id)}</code>\n\n"
-        "<b>Items</b>\n"
-    )
-    text += "".join(
-        f"• {esc(item['product_name'])} × {int(item['quantity'])}\n"
-        for item in items
-    )
-    text += (
-        f"\n{SUPPLIER_ACTION_PROMPT} <b>DONE</b> or <b>ERROR</b>:\n"
-        "<i>Reply to this message with a screenshot to send delivery proof.</i>"
-    )
-    return text
+def supplier_order_text(
+    order_id: str,
+    category: str,
+    player_id: str,
+    items: list[dict],
+    created_at=None,
+    timeout_minutes: int | None = None,
+) -> str:
+    """The task card a supplier group receives.
+
+    The player ID is a code block (tap to copy in every Telegram app; the
+    keyboard adds a one-tap copy button too). Everything from the deadline line
+    down is the "action section", removed when the task is closed.
+    """
+    lines = [
+        f"🆕 <b>NEW ORDER</b>  ·  {esc(category)}",
+        SUPPLIER_DIVIDER,
+        "🎮 <b>PLAYER ID</b>  <i>tap to copy</i>",
+        f"<pre>{esc(player_id)}</pre>",
+    ]
+    lines += [f"📦 <b>{esc(item['product_name'])}</b>  ×  <b>{int(item['quantity'])}</b>" for item in items]
+    when = f"  ·  🕒 {pkt_clock(created_at)} PKT" if created_at else ""
+    lines += ["", f"🧾 <code>{esc(order_id)}</code>{when}"]
+    if timeout_minutes:
+        lines.append(f"{SUPPLIER_ACTION_MARKER} {timeout_minutes} min")
+    lines += [
+        SUPPLIER_DIVIDER,
+        "<i>Tap ✅ Done after delivering · reply with a screenshot to send proof</i>",
+    ]
+    return "\n".join(lines)
 
 
 def supplier_closed_text(original_html: str, footer: str) -> str:
-    """Strip the action prompt from a supplier message and append a final line."""
-    base = original_html.split(SUPPLIER_ACTION_PROMPT)[0].split("Mark as")[0].rstrip()
-    return f"{base}\n\n{footer}"
+    """Strip the action section from a supplier task card and add the outcome."""
+    base = original_html
+    for marker in (SUPPLIER_ACTION_MARKER, SUPPLIER_DIVIDER + "\n<i>", "Mark this group’s items as", "Mark as"):
+        if marker in base:
+            base = base.split(marker)[0]
+            break
+    return f"{base.rstrip()}\n{SUPPLIER_DIVIDER}\n{footer}"
+
+
+def supplier_notice(icon: str, title: str, order_id: str, body: str) -> str:
+    """Replacement text when a task card is closed without its original content."""
+    return f"{icon} <b>{title}</b>\n{SUPPLIER_DIVIDER}\n🧾 <code>{esc(order_id)}</code>\n{body}"

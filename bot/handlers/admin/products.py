@@ -25,6 +25,7 @@ from bot.states.states import (
 from database.database import AsyncSessionLocal
 from database.repositories.product_repo import ProductRepository
 from services.audit import audit
+from services.messages import SUPPLIER_DIVIDER
 from utils.supplier_routing import resolve_supplier_chat
 from utils.ui import esc, panel
 
@@ -457,11 +458,12 @@ async def _verify_and_save_supplier(update: Update, context: ContextTypes.DEFAUL
         await context.bot.send_message(
             chat_id=target_chat,
             text=(
-                f"🤖  <b>SUPPLIER GROUP CONNECTED</b>\n\n"
-                f"✅ This is the active destination for package:\n"
-                f"📦 <b>#{product.id} {esc(product.name)}</b>\n"
-                f"📂 Product group: <b>{esc(product.category)}</b>\n"
-                f"🧭 Routing: <b>{route_source}</b>"
+                "🤝 <b>SUPPLIER GROUP CONNECTED</b>\n"
+                f"{SUPPLIER_DIVIDER}\n"
+                "New orders for this package will arrive here:\n"
+                f"📦 <b>{esc(product.name)}</b>  ·  {esc(product.category)}\n\n"
+                "On each order card: copy the Player ID, deliver, then tap ✅ <b>Done</b> "
+                "(or ❌ <b>Error</b> if you can't). Reply with a screenshot to send proof."
             ),
             parse_mode="HTML"
         )
