@@ -22,7 +22,8 @@ app = Flask(__name__)
 @app.after_request
 def add_cors_headers(response):
     origin = request.headers.get("Origin")
-    if origin and origin in API_CORS_ORIGINS:
+    allow_all = "*" in API_CORS_ORIGINS
+    if origin and (allow_all or origin in API_CORS_ORIGINS or origin == "null"):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key"
@@ -30,6 +31,10 @@ def add_cors_headers(response):
         if "Origin" not in vary_values:
             vary_values.append("Origin")
         response.headers["Vary"] = ", ".join(vary_values)
+    elif allow_all:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key"
     return response
 
 
