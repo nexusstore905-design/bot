@@ -5,7 +5,10 @@ from telegram.ext import ContextTypes, ConversationHandler
 from bot.handlers.admin.common import admin_only, logger
 from bot.keyboards.admin_kb import admin_pin_kb, cancel_conv_kb, create_code_options_kb
 from bot.states.states import (
-    ADMIN_CREATE_CODE_LABEL, ADMIN_RESET_USER, ADMIN_REVOKE_CODE, ADMIN_REVOKE_USER,
+    ADMIN_CREATE_CODE_LABEL,
+    ADMIN_RESET_USER,
+    ADMIN_REVOKE_CODE,
+    ADMIN_REVOKE_USER,
 )
 from database.database import AsyncSessionLocal
 from database.repositories.user_repo import AccessCodeRepository, UserRepository
@@ -13,13 +16,17 @@ from services.audit import audit
 from utils.ui import esc
 
 
-def _code_created_text(code) -> str:
+def _code_created_text(code, bot_username: str | None) -> str:
     return (
         "✅  <b>Access code created</b>\n──────────────\n\n"
         f"🔑  Code: <code>{esc(code.code)}</code>\n"
         f"🏷  Label: {esc(code.label) if code.label else '—'}\n\n"
-        "<b>Give this code to the user.</b>\n"
-        "They enter it after /start to register. Each code works for one person."
+        + (
+            "🔗  <b>One-tap invite link</b> (send this to the user):\n"
+            f"https://t.me/{esc(bot_username)}?start={esc(code.code)}\n\n"
+            if bot_username else ""
+        )
+        + "Or they can send the code after /start. Each code works for one person."
     )
 
 
@@ -56,7 +63,8 @@ async def cb_create_code_instant(update: Update, context: ContextTypes.DEFAULT_T
             code = await AccessCodeRepository(session).create(label=None)
         await audit(update.effective_user, "create_code", code.code)
         await update.callback_query.message.edit_text(
-            _code_created_text(code), parse_mode="HTML", reply_markup=admin_pin_kb(),
+            _code_created_text(code, getattr(context.bot, "username", None)),
+            parse_mode="HTML", reply_markup=admin_pin_kb(), disable_web_page_preview=True,
         )
     except Exception:
         logger.exception("Error creating instant access code")
@@ -75,7 +83,8 @@ async def admin_create_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             code = await AccessCodeRepository(session).create(label=label)
         await audit(update.effective_user, "create_code", f"{code.code} ({label or 'no label'})")
         await update.message.reply_text(
-            _code_created_text(code), parse_mode="HTML", reply_markup=admin_pin_kb(),
+            _code_created_text(code, getattr(context.bot, "username", None)),
+            parse_mode="HTML", reply_markup=admin_pin_kb(), disable_web_page_preview=True,
         )
     except Exception:
         logger.exception("Error in admin_create_code")

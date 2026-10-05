@@ -1,62 +1,111 @@
 """Message templates shared by the bot and the API."""
-from database.models import TERMINAL_ORDER_STATUSES
-from utils.ui import DIVIDER, esc, money
+from datetime import timezone
+from zoneinfo import ZoneInfo
 
-STATUS_DISPLAY = {
-    "pending":    ("⏳", "PENDING",    "Order received, awaiting processing"),
-    "processing": ("⚙️", "PROCESSING", "Your order is being processed"),
-    "completed":  ("✅", "COMPLETED",  "Delivered successfully!"),
-    "failed":     ("❌", "FAILED",     "Issue occurred — contact support"),
-    "cancelled":  ("🚫", "CANCELLED",  "Order was cancelled"),
+from bot.i18n import t
+from database.models import (
+    OPEN_ORDER_STATUSES,
+    TERMINAL_ORDER_STATUSES,
+    OrderStatus,
+    SupplierFulfillmentStatus,
+)
+from utils.ui import DIVIDER, esc, progress_bar, quote
+
+PAKISTAN_TZ = ZoneInfo("Asia/Karachi")
+
+STATUS_ICONS = {
+    "pending": "⏳",
+    "processing": "⚙️",
+    "completed": "✅",
+    "failed": "❌",
+    "cancelled": "🚫",
 }
 
 SUPPLIER_ACTION_PROMPT = "Mark this group’s items as"
+TIMELINE_STEPS = 4
 
 
-def status_parts(status_value: str) -> tuple[str, str, str]:
-    return STATUS_DISPLAY.get(status_value, ("❓", status_value.upper(), ""))
+def status_label(status_value: str, lang: str | None) -> str:
+    return f"{STATUS_ICONS.get(status_value, '❓')} {t(lang, 'st_' + status_value)}"
 
 
-def order_total(items) -> float | None:
-    """Total of priced lines, or None when any line has no price."""
-    total = 0.0
-    for item in items:
-        price = item.get("unit_price") if isinstance(item, dict) else item.unit_price
-        quantity = item.get("quantity") if isinstance(item, dict) else item.quantity
-        if price is None:
-            return None
-        total += price * quantity
-    return round(total, 2)
+def _clock(value) -> str:
+    if value is None:
+        return ""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(PAKISTAN_TZ).strftime("%H:%M")
 
 
-def item_lines(items, show_prices: bool) -> str:
+def order_timeline(order, lang: str | None) -> tuple[list[str], int]:
+    """Timeline lines and how many of the four steps are done."""
+    parts = list(getattr(order, "fulfillments", None) or [])
+    dispatched = [part.dispatched_at for part in parts if part.dispatched_at]
+    sent = bool(dispatched) or (not parts and order.supplier_msg_id is not None)
+    retrying = any(
+        part.status in (SupplierFulfillmentStatus.queued, SupplierFulfillmentStatus.sending)
+        and part.dispatch_attempts > 0
+        for part in parts
+    )
+    lines = [f"✅ {t(lang, 'tl_placed')} · {_clock(order.created_at)}"]
+    done = 1
+    if sent:
+        when = f" · {_clock(min(dispatched))}" if dispatched else ""
+        lines.append(f"✅ {t(lang, 'tl_sent')}{when}")
+        done = 2
+    elif retrying:
+        lines.append(f"🔁 {t(lang, 'tl_retrying')}")
+    elif order.status in OPEN_ORDER_STATUSES:
+        lines.append(f"⏳ {t(lang, 'tl_sent')}")
+
+    if order.status == OrderStatus.completed:
+        lines.append(f"✅ {t(lang, 'tl_delivered')} · {_clock(order.updated_at)}")
+        done = TIMELINE_STEPS
+    elif order.status == OrderStatus.failed:
+        lines.append(f"❌ {t(lang, 'tl_failed')}")
+    elif order.status == OrderStatus.cancelled:
+        lines.append(f"🚫 {t(lang, 'tl_cancelled')}")
+    else:
+        if sent:
+            lines.append(f"⏳ {t(lang, 'tl_working')}")
+            done = 3
+        lines.append(f"○ {t(lang, 'tl_delivered')}")
+    return lines, done
+
+
+def item_lines(items) -> str:
     lines = []
     for item in items:
         name = item["product_name"] if isinstance(item, dict) else item.product_name
         quantity = item["quantity"] if isinstance(item, dict) else item.quantity
-        price = item.get("unit_price") if isinstance(item, dict) else item.unit_price
-        line = f"• {esc(name)} × {quantity}"
-        if show_prices and price is not None:
-            line += f" — {money(price * quantity)}"
-        lines.append(line)
-    return "\n".join(lines) or "• Order details unavailable"
+        lines.append(f"• {esc(name)} × {quantity}")
+    return "\n".join(lines) or "• —"
 
 
-def order_card_text(order, show_prices: bool, title: str = "🔎 <b>Order details</b>") -> str:
-    icon, label, desc = status_parts(order.status.value)
-    text = (
-        f"{title}\n{DIVIDER}\n\n"
-        f"🧾 <b>Order ID</b>  <code>{esc(order.order_id)}</code>\n"
-        f"{icon} <b>{label}</b> · {esc(desc)}\n\n"
-        f"<b>Items</b>\n{item_lines(order.items, show_prices)}\n"
+def order_card_text(order, lang: str | None, title: str | None = None, footer: str | None = None) -> str:
+    """The customer's live order card: status bar, timeline, and details."""
+    lines = []
+    if title:
+        lines += [title, f"🧾 <code>{esc(order.order_id)}</code>"]
+    else:
+        lines.append(f"🧾 <b>{t(lang, 'order')}</b> <code>{esc(order.order_id)}</code>")
+    timeline, done = order_timeline(order, lang)
+    if order.status not in (OrderStatus.failed, OrderStatus.cancelled):
+        lines.append(f"{progress_bar(done, TIMELINE_STEPS)}  {status_label(order.status.value, lang)}")
+    else:
+        lines.append(status_label(order.status.value, lang))
+    lines.append("")
+    lines += timeline
+    details = (
+        f"<b>{t(lang, 'items')}</b>\n{item_lines(order.items)}\n"
+        f"🎮 {t(lang, 'player_id')}: <code>{esc(order.player_id)}</code>"
     )
-    total = order_total(order.items) if show_prices else None
-    if total is not None:
-        text += f"💰 <b>Total</b>  {money(total)}\n"
-    text += f"\n🎮 <b>Player ID</b>  <code>{esc(order.player_id)}</code>"
-    if any(getattr(part, "proof_file_id", None) for part in getattr(order, "fulfillments", []) or []):
-        text += "\n📸 Delivery proof received"
-    return text
+    lines.append(quote(details, expandable=len(order.items) > 4))
+    if any(getattr(part, "proof_file_id", None) for part in getattr(order, "fulfillments", None) or []):
+        lines.append(t(lang, "proof_received"))
+    if footer:
+        lines += ["", footer]
+    return "\n".join(lines)
 
 
 def is_terminal(order) -> bool:

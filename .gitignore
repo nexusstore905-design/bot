@@ -45,3 +45,6 @@ maintenance.flag
 
 # Test cache
 .pytest_cache/
+
+# Daily database backups
+backups/

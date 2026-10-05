@@ -1,9 +1,17 @@
 import enum
 from datetime import datetime, timezone
-from typing import Optional, List
+
 from sqlalchemy import (
-    BigInteger, Boolean, DateTime, Enum, Float,
-    ForeignKey, Index, Integer, String, Text, UniqueConstraint,
+    BigInteger,
+    Boolean,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
@@ -73,26 +81,28 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
-    username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    full_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    full_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Interface language for customer screens ("en" or "ur"); None = not chosen yet.
+    language: Mapped[str | None] = mapped_column(String(8), nullable=True)
     auth_status: Mapped[AuthStatus] = mapped_column(
         Enum(AuthStatus), default=AuthStatus.unauthenticated, nullable=False
     )
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    locked_until: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
-    last_login: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
-    session_expires: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    locked_until: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    last_login: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    session_expires: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
-    orders: Mapped[List["Order"]] = relationship("Order", back_populates="user", lazy="select")
+    orders: Mapped[list["Order"]] = relationship("Order", back_populates="user", lazy="select")
 
 
 class PinConfig(Base):
     __tablename__ = "pin_config"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
-    hashed_pin: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    hashed_pin: Mapped[str | None] = mapped_column(String(256), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
     invalidate_sessions: Mapped[bool] = mapped_column(Boolean, default=False)
 
@@ -110,11 +120,11 @@ class AccessCode(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, index=True)
-    label: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)  # e.g. "John's code"
-    used_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)  # telegram_id
+    label: Mapped[str | None] = mapped_column(String(64), nullable=True)  # e.g. "John's code"
+    used_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # telegram_id
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
-    used_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class Product(Base):
@@ -123,15 +133,13 @@ class Product(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     category: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
-    # Optional customer price; shown only when the admin enables price display.
-    price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # Each package can route to its own supplier Telegram group/chat.
-    supplier_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    supplier_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
-    order_items: Mapped[List["OrderItem"]] = relationship("OrderItem", back_populates="product")
+    order_items: Mapped[list["OrderItem"]] = relationship("OrderItem", back_populates="product")
 
 
 class Order(Base):
@@ -145,26 +153,26 @@ class Order(Base):
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     # Keep the issuing store ID as an audit value without tying historical
     # orders to a deletable API-store row.
-    api_store_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
-    idempotency_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    api_store_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[OrderStatus] = mapped_column(
         Enum(OrderStatus), default=OrderStatus.pending, nullable=False
     )
     player_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    supplier_msg_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    customer_msg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    settled_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True, index=True)
-    settled_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    supplier_msg_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    customer_msg_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    settled_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, index=True)
+    settled_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
     user: Mapped["User"] = relationship("User", back_populates="orders")
-    items: Mapped[List["OrderItem"]] = relationship("OrderItem", back_populates="order", lazy="selectin")
-    history: Mapped[List["OrderStatusHistory"]] = relationship(
+    items: Mapped[list["OrderItem"]] = relationship("OrderItem", back_populates="order", lazy="selectin")
+    history: Mapped[list["OrderStatusHistory"]] = relationship(
         "OrderStatusHistory", back_populates="order", order_by="OrderStatusHistory.created_at"
     )
-    fulfillments: Mapped[List["SupplierFulfillment"]] = relationship(
+    fulfillments: Mapped[list["SupplierFulfillment"]] = relationship(
         "SupplierFulfillment", back_populates="order", cascade="all, delete-orphan",
         order_by="SupplierFulfillment.id", lazy="selectin",
     )
@@ -176,13 +184,11 @@ class OrderItem(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     order_id: Mapped[int] = mapped_column(Integer, ForeignKey("orders.id"), nullable=False)
     # Keep the product name snapshot for order history if products are reset.
-    product_id: Mapped[Optional[int]] = mapped_column(
+    product_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("products.id", ondelete="SET NULL"), nullable=True
     )
     product_name: Mapped[str] = mapped_column(String(128), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    # Price snapshot at order time; None when the product had no price.
-    unit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     order: Mapped["Order"] = relationship("Order", back_populates="items")
     product: Mapped["Product"] = relationship("Product", back_populates="order_items")
@@ -193,10 +199,10 @@ class OrderStatusHistory(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     order_id: Mapped[int] = mapped_column(Integer, ForeignKey("orders.id"), nullable=False)
-    old_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    old_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     new_status: Mapped[str] = mapped_column(String(32), nullable=False)
-    changed_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    changed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     order: Mapped["Order"] = relationship("Order", back_populates="history")
@@ -214,15 +220,15 @@ class SupplierFulfillment(Base):
     status: Mapped[SupplierFulfillmentStatus] = mapped_column(
         Enum(SupplierFulfillmentStatus), default=SupplierFulfillmentStatus.queued, nullable=False
     )
-    changed_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    supplier_msg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    failure_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    changed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    supplier_msg_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    failure_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     dispatch_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    next_attempt_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     # The supplier timeout counts from delivery, not from order creation.
-    dispatched_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
-    responded_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
-    proof_file_id: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    dispatched_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    responded_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    proof_file_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
@@ -241,9 +247,9 @@ class ApiStore(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     daily_limit: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # 0 = unlimited
     orders_today: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    last_reset: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), default=utcnow)
-    webhook_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
-    webhook_secret: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_reset: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=utcnow)
+    webhook_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    webhook_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
@@ -268,7 +274,7 @@ class UserOrderLimit(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
     daily_limit: Mapped[int] = mapped_column(Integer, default=5, nullable=False)  # 0 = blocked
     orders_today: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    last_reset: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), default=utcnow)
+    last_reset: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=utcnow)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
@@ -293,8 +299,8 @@ class WebhookEvent(Base):
     payload: Mapped[str] = mapped_column(Text, nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_attempt_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
-    delivered_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
-    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
@@ -303,9 +309,9 @@ class AdminAuditLog(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     admin_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    admin_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    admin_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     action: Mapped[str] = mapped_column(String(64), nullable=False)
-    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
 
 
@@ -318,5 +324,16 @@ class SupportMessage(Base):
     admin_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     admin_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     customer_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    order_id: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    order_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class ApiRateCounter(Base):
+    """Fixed one-minute request windows per API caller, shared by all WSGI workers."""
+    __tablename__ = "api_rate_counters"
+    __table_args__ = (UniqueConstraint("bucket", "window_start", name="ux_rate_bucket_window"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bucket: Mapped[str] = mapped_column(String(80), nullable=False)
+    window_start: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, index=True)
+    count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

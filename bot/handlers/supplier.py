@@ -4,16 +4,21 @@ import logging
 
 from sqlalchemy import select
 from telegram import Update
-from telegram.ext import ContextTypes, MessageHandler, CallbackQueryHandler, filters
+from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
+from bot.i18n import t
 from database.database import AsyncSessionLocal
 from database.models import (
-    OrderStatus, SupplierFulfillmentStatus, OrderItem, Product,
-    OPEN_ORDER_STATUSES, TERMINAL_ORDER_STATUSES,
+    OPEN_ORDER_STATUSES,
+    TERMINAL_ORDER_STATUSES,
+    OrderItem,
+    OrderStatus,
+    Product,
+    SupplierFulfillmentStatus,
 )
 from database.repositories.order_repo import OrderRepository
 from services.messages import supplier_closed_text
-from services.notify import announce_order_status, notify_admins
+from services.notify import announce_order_status, notify_team
 from utils.supplier_routing import resolve_supplier_chat
 from utils.ui import esc
 
@@ -125,7 +130,7 @@ async def _process_supplier_action(
 
 async def _after_supplier_action(context: ContextTypes.DEFAULT_TYPE, result: dict) -> None:
     if result["fulfillment_status"] == SupplierFulfillmentStatus.failed:
-        await notify_admins(
+        await notify_team(
             context.bot,
             "⚠️ <b>SUPPLIER REPORTED AN ORDER ISSUE</b>\n\n"
             f"Order: <code>{esc(result['order_id'])}</code>\n"
@@ -133,16 +138,13 @@ async def _after_supplier_action(context: ContextTypes.DEFAULT_TYPE, result: dic
             f"Supplier chat: <code>{result['supplier_chat_id']}</code>\n"
             f"Current order status: <b>{result['order_status'].value.upper()}</b>",
         )
-    headline = None
+    notice = None
     if (
         result["order_status"] not in TERMINAL_ORDER_STATUSES
         and result["fulfillment_status"] == SupplierFulfillmentStatus.failed
     ):
-        headline = (
-            "⚠️ <b>One supplier group reported an issue</b>\n"
-            "The rest of your order continues, and support has been notified."
-        )
-    await announce_order_status(context.bot, result["order_id"], headline=headline)
+        notice = "n_group_issue"
+    await announce_order_status(context.bot, result["order_id"], notice)
 
 
 async def handle_supplier_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -226,10 +228,7 @@ async def handle_supplier_proof(update: Update, context: ContextTypes.DEFAULT_TY
         await context.bot.send_photo(
             chat_id=order.user.telegram_id,
             photo=part.proof_file_id,
-            caption=(
-                f"📸 <b>Delivery proof</b> for order <code>{esc(order.order_id)}</code>\n"
-                f"Product group: {esc(part.category)}"
-            ),
+            caption=f"{t(order.user.language, 'n_proof', order_id=order.order_id)}\n{esc(part.category)}",
             parse_mode="HTML",
         )
         await message.reply_text("📸 Proof sent to the customer.")

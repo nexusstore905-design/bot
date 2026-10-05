@@ -6,8 +6,9 @@ from sqlalchemy.orm import selectinload
 from telegram import InputFile, Update
 from telegram.ext import ContextTypes
 
-from bot.handlers.admin.common import PAKISTAN_TZ, admin_only, advanced_kb, local_datetime
+from bot.handlers.admin.common import PAKISTAN_TZ, admin_only, advanced_kb, local_datetime, team_only
 from bot.keyboards.admin_kb import admin_dashboard_kb
+from bot.middlewares.auth_middleware import is_admin
 from database.database import AsyncSessionLocal
 from database.models import ApiStore, Order, SupplierFulfillment, SupplierFulfillmentStatus
 from database.repositories.stats_repo import StatsRepository
@@ -37,7 +38,7 @@ def _day_bounds_pkt(days_back: int = 0):
     return start, start + timedelta(days=1)
 
 
-@admin_only
+@team_only
 async def cb_admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     today_start, today_end = _day_bounds_pkt()
@@ -88,11 +89,11 @@ async def cb_admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines += ["", "<b>Orders by source today</b>"]
         lines += [f"• {esc(name)}: {count}" for name, count in sources]
     await update.callback_query.message.edit_text(
-        "\n".join(lines), parse_mode="HTML", reply_markup=admin_dashboard_kb(),
+        "\n".join(lines), parse_mode="HTML", reply_markup=admin_dashboard_kb(is_admin(update.effective_user.id)),
     )
 
 
-@admin_only
+@team_only
 async def cb_supplier_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     end = utcnow()
@@ -117,7 +118,9 @@ async def cb_supplier_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Avg response: {_duration(row['avg_response_seconds'])}"
             )
         text = "\n".join(lines)
-    await update.callback_query.message.edit_text(text, parse_mode="HTML", reply_markup=admin_dashboard_kb())
+    await update.callback_query.message.edit_text(
+        text, parse_mode="HTML", reply_markup=admin_dashboard_kb(is_admin(update.effective_user.id)),
+    )
 
 
 @admin_only

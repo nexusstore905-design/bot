@@ -23,6 +23,7 @@ os.environ.update({
     "DATABASE_URL": f"sqlite+aiosqlite:///{TEST_DB.as_posix()}",
     "BOT_TOKEN": "123:test-token",
     "ADMIN_IDS": "999",
+    "STAFF_IDS": "777",
     "SUPPLIER_CHAT_ID": "-100500",
     "API_KEY": "master-test-key",
     "API_CORS_ORIGINS": "https://shop.example",
@@ -31,7 +32,9 @@ os.environ.update({
 
 from database.database import AsyncSessionLocal, init_db  # noqa: E402
 from database.models import (  # noqa: E402
-    AuthStatus, Product, User,
+    AuthStatus,
+    Product,
+    User,
 )
 from database.repositories.api_store_repo import ApiStoreRepository  # noqa: E402
 from database.repositories.order_repo import OrderRepository  # noqa: E402
@@ -43,6 +46,7 @@ asyncio.run(init_db())
 SUPPLIER_A = -100111
 SUPPLIER_B = -100222
 ADMIN_ID = 999
+STAFF_ID = 777
 
 
 def run(coro):
@@ -104,11 +108,12 @@ class FakeBot:
 
 # ─── Data helpers ─────────────────────────────────────────────────────
 
-async def make_user(telegram_id: int = 111, member: bool = True, revoked: bool = False) -> User:
+async def make_user(telegram_id: int = 111, member: bool = True, revoked: bool = False, language=None) -> User:
     async with AsyncSessionLocal() as session:
         user = User(
             telegram_id=telegram_id,
             full_name=f"User {telegram_id}",
+            language=language,
             auth_status=AuthStatus.revoked if revoked else (
                 AuthStatus.authenticated if member else AuthStatus.unauthenticated
             ),
@@ -120,9 +125,9 @@ async def make_user(telegram_id: int = 111, member: bool = True, revoked: bool =
         return user
 
 
-async def make_product(name="60 UC", category="PUBG UC", price=None, chat=SUPPLIER_A) -> Product:
+async def make_product(name="60 UC", category="PUBG UC", chat=SUPPLIER_A) -> Product:
     async with AsyncSessionLocal() as session:
-        product = Product(category=category, name=name, price=price, supplier_chat_id=chat)
+        product = Product(category=category, name=name, supplier_chat_id=chat)
         session.add(product)
         await session.commit()
         await session.refresh(product)

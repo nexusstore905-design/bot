@@ -1,5 +1,6 @@
 import re
-from sqlalchemy import delete, exists, select, func, text, update
+
+from sqlalchemy import delete, exists, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import AppSetting, OrderItem, Product
@@ -20,7 +21,7 @@ class ProductRepository:
 
     async def get_all_active(self) -> list[Product]:
         result = await self.session.execute(
-            select(Product).where(Product.is_active == True).order_by(Product.category)
+            select(Product).where(Product.is_active.is_(True)).order_by(Product.category)
         )
         products = list(result.scalars().all())
         return sorted(products, key=lambda p: (p.category.casefold(), *_product_name_sort_key(p.name)))
@@ -116,7 +117,7 @@ class ProductRepository:
     async def get_categories(self) -> list[str]:
         result = await self.session.execute(
             select(Product.category)
-            .where(Product.is_active == True)
+            .where(Product.is_active.is_(True))
             .distinct()
             .order_by(func.lower(Product.category))
         )
@@ -125,10 +126,22 @@ class ProductRepository:
     async def get_by_category(self, category: str) -> list[Product]:
         result = await self.session.execute(
             select(Product)
-            .where(Product.is_active == True, Product.category == category)
+            .where(Product.is_active.is_(True), Product.category == category)
         )
         products = list(result.scalars().all())
         return sorted(products, key=lambda p: _product_name_sort_key(p.name))
+
+    async def search_active(self, query: str, limit: int = 20) -> list[Product]:
+        """Active packages whose name or group contains the query (case-insensitive)."""
+        pattern = f"%{query.strip().casefold()}%"
+        result = await self.session.execute(
+            select(Product).where(
+                Product.is_active.is_(True),
+                (func.lower(Product.name).like(pattern)) | (func.lower(Product.category).like(pattern)),
+            )
+        )
+        products = list(result.scalars().all())
+        return sorted(products, key=lambda p: (p.category.casefold(), *_product_name_sort_key(p.name)))[:limit]
 
     async def get_by_id(self, product_id: int) -> Product | None:
         return await self.session.get(Product, product_id)
@@ -183,14 +196,6 @@ class ProductRepository:
             self.session.add_all(products)
             await self.session.commit()
         return products, skipped
-
-    async def set_price(self, product_id: int, price: float | None) -> Product | None:
-        product = await self.get_by_id(product_id)
-        if product is None or not product.is_active:
-            return None
-        product.price = None if price is None else round(price, 2)
-        await self.session.commit()
-        return product
 
     async def update_name(self, product_id: int, new_name: str) -> bool:
         product = await self.get_by_id(product_id)

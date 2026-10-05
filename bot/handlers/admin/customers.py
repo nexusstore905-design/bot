@@ -8,13 +8,25 @@ from telegram import InputFile, Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 from bot.handlers.admin.common import (
-    PAKISTAN_TZ, STATUS_ICONS, admin_label, admin_only, local_datetime, logger,
+    PAKISTAN_TZ,
+    STATUS_ICONS,
+    admin_label,
+    admin_only,
+    local_datetime,
+    logger,
+    team_only,
 )
 from bot.keyboards.admin_kb import (
-    admin_customer_detail_kb, admin_customer_orders_kb, admin_customer_unsettled_kb,
-    admin_customers_kb, admin_main_kb, cancel_conv_kb, confirm_customer_settlement_kb,
+    admin_customer_detail_kb,
+    admin_customer_orders_kb,
+    admin_customer_unsettled_kb,
+    admin_customers_kb,
+    admin_main_kb,
+    cancel_conv_kb,
+    confirm_customer_settlement_kb,
     customer_date_result_kb,
 )
+from bot.middlewares.auth_middleware import is_admin
 from bot.states.states import ADMIN_CUSTOMER_DATE_RANGE
 from database.database import AsyncSessionLocal
 from database.models import ApiStore, Order, OrderStatus
@@ -22,7 +34,7 @@ from database.repositories.order_repo import OrderRepository
 from database.repositories.user_repo import UserRepository
 from services.audit import audit
 from utils.exports import orders_csv
-from utils.ui import esc, money
+from utils.ui import esc
 
 CUSTOMER_PAGE_SIZE = 10
 CUSTOMER_ORDERS_PAGE_SIZE = 5
@@ -88,14 +100,16 @@ async def _get_customer_page(session, page: int):
     return users, total, admin_customers_kb(users, page, total, CUSTOMER_PAGE_SIZE)
 
 
-@admin_only
+@team_only
 async def cb_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     async with AsyncSessionLocal() as session:
         customers, total, keyboard = await _get_customer_page(session, 0)
 
     if not total:
-        await update.callback_query.message.edit_text("No users yet.", reply_markup=admin_main_kb())
+        await update.callback_query.message.edit_text(
+            "No users yet.", reply_markup=admin_main_kb(is_admin(update.effective_user.id)),
+        )
         return
 
     await update.callback_query.message.edit_text(
@@ -103,7 +117,7 @@ async def cb_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-@admin_only
+@team_only
 async def cb_customer_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     page = max(0, int(update.callback_query.data.split(":", 1)[1]))
@@ -118,7 +132,7 @@ async def cb_customer_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-@admin_only
+@team_only
 async def cb_customer_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     telegram_id = int(update.callback_query.data.split(":", 1)[1])
@@ -131,18 +145,13 @@ async def cb_customer_details(update: Update, context: ContextTypes.DEFAULT_TYPE
         summary = await orders.summarize_user_orders(user.id)
         latest_orders = await orders.get_by_user(user.id, limit=1)
         unsettled_count = await orders.count_unsettled_by_user(user.id)
-        balance = await orders.unsettled_balance_by_user(user.id)
+        summary_stats = await orders.customer_summary(user.id)
 
     name = esc(user.full_name or "Unknown")
     username = f"@{esc(user.username)}" if user.username else "Not set"
     last_order = "—"
     if latest_orders:
         last_order = f"{local_datetime(latest_orders[0].created_at)} · {latest_orders[0].status.value}"
-    amount = ""
-    if balance["orders"] and (balance["total"] or not balance["unpriced_lines"]):
-        amount = f" · amount <b>{money(balance['total'])}</b>"
-        if balance["unpriced_lines"]:
-            amount += f" (+{balance['unpriced_lines']} unpriced line(s))"
     text = (
         "👤 <b>Customer details</b>\n\n"
         f"Name: <b>{name}</b>\n"
@@ -151,17 +160,19 @@ async def cb_customer_details(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"Access: {esc(user.auth_status.value)}\n"
         f"Joined: {local_datetime(user.created_at)}\n"
         f"Last order: {last_order}\n"
-        f"Last payment cleared: {local_datetime(balance['last_settled_at'])}\n\n"
-        f"💰 Completed orders with payment not cleared: <b>{unsettled_count}</b>{amount}\n\n"
+        f"Language: {esc(user.language or 'not chosen')}\n"
+        f"Last payment cleared: {local_datetime(summary_stats['last_settled_at'])}\n\n"
+        f"💰 Completed orders with payment not cleared: <b>{unsettled_count}</b>\n\n"
         "<b>All-time orders</b>\n"
         + "\n".join(_customer_summary_lines(summary))
     )
     await update.callback_query.message.edit_text(
-        text, parse_mode="HTML", reply_markup=admin_customer_detail_kb(telegram_id, unsettled_count)
+        text, parse_mode="HTML",
+        reply_markup=admin_customer_detail_kb(telegram_id, unsettled_count, is_admin(update.effective_user.id)),
     )
 
 
-@admin_only
+@team_only
 async def cb_customer_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     _, telegram_id_text, page_text = update.callback_query.data.split(":", 2)
@@ -213,7 +224,7 @@ async def cb_customer_orders(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
-@admin_only
+@team_only
 async def cb_customer_unsettled(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     _, telegram_id_text, page_text = update.callback_query.data.split(":", 2)
@@ -373,7 +384,7 @@ async def cb_customer_export(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
-@admin_only
+@team_only
 async def cb_customer_dates_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     telegram_id = int(update.callback_query.data.split(":", 1)[1])
@@ -395,7 +406,7 @@ async def cb_customer_dates_start(update: Update, context: ContextTypes.DEFAULT_
     return ADMIN_CUSTOMER_DATE_RANGE
 
 
-@admin_only
+@team_only
 async def admin_customer_date_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         start_at, end_at, label = customer_date_bounds(update.message.text)

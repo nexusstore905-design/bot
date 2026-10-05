@@ -10,15 +10,16 @@ import uuid
 from datetime import timedelta
 
 from flask import Flask, jsonify, request
-from sqlalchemy import text
+from sqlalchemy import select, text
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from telegram import Bot
 from telegram.request import HTTPXRequest
 from werkzeug.exceptions import HTTPException
 
-from config.settings import API_CORS_ORIGINS, API_KEY, BOT_TOKEN, CURRENCY
+from config.settings import API_CORS_ORIGINS, API_KEY, API_RATE_LIMIT_PER_MINUTE, BOT_TOKEN
 from database.database import AsyncSessionLocal, init_db
-from database.models import AuthStatus, SupplierFulfillmentStatus
+from database.models import ApiRateCounter, AuthStatus, SupplierFulfillmentStatus
 from database.repositories.api_store_repo import ApiStoreRepository, UserOrderLimitRepository
 from database.repositories.order_repo import OrderRepository
 from database.repositories.product_repo import ProductRepository
@@ -26,6 +27,7 @@ from database.repositories.user_repo import UserRepository
 from services import app_settings
 from services.dispatch import dispatch_order
 from utils.helpers import utcnow
+from utils.security import hash_api_key
 from utils.supplier_routing import resolve_supplier_chat
 
 logger = logging.getLogger(__name__)
@@ -56,15 +58,19 @@ except Exception:
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, detail: str):
+    def __init__(self, status: int, detail: str, retry_after: int | None = None):
         super().__init__(detail)
         self.status = status
         self.detail = detail
+        self.retry_after = retry_after
 
 
 @app.errorhandler(ApiError)
 def api_error(exc: ApiError):
-    return jsonify({"detail": exc.detail}), exc.status
+    response = jsonify({"detail": exc.detail})
+    if exc.retry_after is not None:
+        response.headers["Retry-After"] = str(exc.retry_after)
+    return response, exc.status
 
 
 @app.errorhandler(HTTPException)
@@ -87,9 +93,47 @@ def add_cors_headers(response):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key, Idempotency-Key"
+        response.headers["Access-Control-Expose-Headers"] = "Retry-After"
         response.headers["Access-Control-Max-Age"] = "600"
         response.vary.add("Origin")
     return response
+
+
+async def _count_request(session, bucket: str) -> int:
+    window = utcnow().replace(second=0, microsecond=0)
+    await session.execute(
+        sqlite_insert(ApiRateCounter)
+        .values(bucket=bucket, window_start=window, count=1)
+        .on_conflict_do_update(
+            index_elements=["bucket", "window_start"],
+            set_={"count": ApiRateCounter.count + 1},
+        )
+    )
+    await session.commit()
+    return int(await session.scalar(
+        select(ApiRateCounter.count).where(
+            ApiRateCounter.bucket == bucket, ApiRateCounter.window_start == window,
+        )
+    ) or 0)
+
+
+async def _rate_limit(session, api_key: str, client_ip: str) -> None:
+    """Fixed one-minute windows per key, plus a looser per-IP cap against key guessing."""
+    checks = [(f"ip:{client_ip}", API_RATE_LIMIT_PER_MINUTE * 5)]
+    if api_key:
+        checks.append((f"key:{hash_api_key(api_key)[:24]}", API_RATE_LIMIT_PER_MINUTE))
+    for bucket, limit in checks:
+        if await _count_request(session, bucket) > limit:
+            raise ApiError(
+                429, f"Rate limit exceeded ({limit} requests per minute). Slow down and retry.",
+                retry_after=60 - utcnow().second,
+            )
+
+
+def _client_ip() -> str:
+    # PythonAnywhere puts the real client address first in X-Forwarded-For.
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    return (forwarded.split(",")[0].strip() or request.remote_addr or "unknown")[:45]
 
 
 async def _authenticate(session, api_key: str) -> int | None:
@@ -131,8 +175,6 @@ def _order_payload(order) -> dict:
         "product_id": item.product_id if item else None,
         "product_name": item.product_name if item else None,
         "quantity": item.quantity if item else None,
-        "unit_price": item.unit_price if item else None,
-        "currency": CURRENCY,
         "player_id": order.player_id,
         "created_at": order.created_at.isoformat(),
         "updated_at": order.updated_at.isoformat() if order.updated_at else None,
@@ -150,12 +192,14 @@ def index():
     return jsonify({
         "status": "online",
         "service": "Nexus Store API",
+        "version": "v1",
         "endpoints": {
-            "GET /products/": "List active products",
-            "POST /orders/": "Place order (send Idempotency-Key to make retries safe)",
-            "GET /orders/<order_id>": "Check status",
+            "GET /v1/products/": "List active products",
+            "POST /v1/orders/": "Place order (send Idempotency-Key to make retries safe)",
+            "GET /v1/orders/<order_id>": "Check status",
             "GET /health": "Database and bot status",
         },
+        "note": "Unversioned paths (/orders/, /products/) remain as aliases of /v1/.",
     })
 
 
@@ -188,32 +232,28 @@ def health():
     return jsonify(payload), 503 if strict and bot_state != "ok" else 200
 
 
+@app.route("/v1/products/", methods=["GET"])
 @app.route("/products/", methods=["GET"])
 def list_products():
-    api_key = _api_key()
+    api_key, client_ip = _api_key(), _client_ip()
 
     async def _list():
         async with AsyncSessionLocal() as session:
+            await _rate_limit(session, api_key, client_ip)
             await _authenticate(session, api_key)
             products = await ProductRepository(session).get_all_active()
-        show_prices = await app_settings.show_prices()
         return [
-            {
-                "product_id": product.id,
-                "category": product.category,
-                "name": product.name,
-                "price": product.price if show_prices else None,
-                "currency": CURRENCY,
-            }
+            {"product_id": product.id, "category": product.category, "name": product.name}
             for product in products
         ]
 
     return jsonify({"products": run_async(_list())}), 200
 
 
+@app.route("/v1/orders/", methods=["POST"])
 @app.route("/orders/", methods=["POST"])
 def create_order():
-    api_key = _api_key()
+    api_key, client_ip = _api_key(), _client_ip()
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         raise ApiError(400, "Request body must be a JSON object")
@@ -228,7 +268,7 @@ def create_order():
         telegram_user_id = int(telegram_user_id)
         product_id = int(product_id)
     except (TypeError, ValueError):
-        raise ApiError(400, "telegram_user_id and product_id must be integers")
+        raise ApiError(400, "telegram_user_id and product_id must be integers") from None
     idempotency_key = request.headers.get("Idempotency-Key", "").strip() or None
     if idempotency_key and (
         len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LENGTH
@@ -253,6 +293,7 @@ def create_order():
 
     async def _process():
         async with AsyncSessionLocal() as session:
+            await _rate_limit(session, api_key, client_ip)
             store_id = await _authenticate(session, api_key)
         if idempotency_key:
             replay = await _replay(store_id)
@@ -294,12 +335,7 @@ def create_order():
             try:
                 order = await OrderRepository(session).create_order(
                     user_id=user.id,
-                    items=[{
-                        "product_id": product.id,
-                        "product_name": product.name,
-                        "quantity": 1,
-                        "unit_price": product.price,
-                    }],
+                    items=[{"product_id": product.id, "product_name": product.name, "quantity": 1}],
                     player_id=player_id,
                     api_store_id=store_id,
                     idempotency_key=idempotency_key,
@@ -330,12 +366,14 @@ def create_order():
     return jsonify(run_async(_process())), 200
 
 
+@app.route("/v1/orders/<order_id>", methods=["GET"])
 @app.route("/orders/<order_id>", methods=["GET"])
 def get_order_status(order_id):
-    api_key = _api_key()
+    api_key, client_ip = _api_key(), _client_ip()
 
     async def _fetch():
         async with AsyncSessionLocal() as session:
+            await _rate_limit(session, api_key, client_ip)
             store_id = await _authenticate(session, api_key)
             order = await OrderRepository(session).get_by_order_id(order_id.strip().upper(), api_store_id=store_id)
         if order is None:

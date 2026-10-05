@@ -6,12 +6,19 @@ import httpx
 
 from bot.handlers.supplier import cb_supplier_action, handle_supplier_proof
 from conftest import (
-    SUPPLIER_A, FakeBot, fake_user, make_order, make_store, make_user, run, sql,
+    SUPPLIER_A,
+    FakeBot,
+    fake_user,
+    make_order,
+    make_store,
+    make_user,
+    run,
+    sql,
 )
 from database.database import AsyncSessionLocal
+from database.models import OrderStatus
 from database.repositories.api_store_repo import ApiStoreRepository
 from database.repositories.order_repo import OrderRepository
-from database.models import OrderStatus
 from services.dispatch import dispatch_order
 from services.messages import supplier_order_text
 from services.webhooks import deliver_due

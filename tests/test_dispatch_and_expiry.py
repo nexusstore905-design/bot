@@ -1,6 +1,14 @@
 """Supplier delivery retries and the supplier timeout."""
 from conftest import (
-    ADMIN_ID, SUPPLIER_A, SUPPLIER_B, FakeBot, make_order, make_user, minutes_ago, run, sql,
+    ADMIN_ID,
+    SUPPLIER_A,
+    SUPPLIER_B,
+    FakeBot,
+    make_order,
+    make_user,
+    minutes_ago,
+    run,
+    sql,
 )
 from database.database import AsyncSessionLocal
 from database.models import SupplierFulfillmentStatus
@@ -137,6 +145,7 @@ def test_expiry_never_overwrites_a_part_answered_meanwhile(monkeypatch):
 
             session.execute = execute_with_race
             from datetime import timedelta
+
             from utils.helpers import utcnow
             return await repo.expire_stale(utcnow(), timedelta(minutes=10))
 

@@ -104,6 +104,7 @@ def _m003_order_idempotency_and_prices(conn: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_store_idem "
         "ON orders (api_store_id, idempotency_key)"
     )
+    # No longer used (the bot shows no prices); kept so the version history stays valid.
     _add_column(conn, "order_items", "unit_price", "FLOAT")
 
 
@@ -171,12 +172,17 @@ def _m005_hashed_store_keys(conn: sqlite3.Connection) -> None:
     )
 
 
+def _m006_user_language(conn: sqlite3.Connection) -> None:
+    _add_column(conn, "users", "language", "VARCHAR(8)")
+
+
 MIGRATIONS = [
     (1, _m001_legacy_columns),
     (2, _m002_product_price_optional),
     (3, _m003_order_idempotency_and_prices),
     (4, _m004_fulfillment_tracking),
     (5, _m005_hashed_store_keys),
+    (6, _m006_user_language),
 ]
 LATEST_VERSION = MIGRATIONS[-1][0]
 

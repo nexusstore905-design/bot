@@ -4,23 +4,58 @@ import html
 import logging
 import time
 import traceback
+from datetime import datetime, timedelta
 
 import httpx
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config.settings import SUPPLIER_TIMEOUT_MINUTES
+from config.settings import BACKUP_DIR, BACKUP_KEEP_DAYS, SUPPLIER_TIMEOUT_MINUTES
 from services import app_settings
 from services.dispatch import dispatch_due
 from services.expiry import expire_stale_orders
 from services.notify import notify_admins
 from services.webhooks import deliver_due
+from utils.backup import backup_sqlite
+from utils.helpers import as_utc, utcnow
 
 logger = logging.getLogger(__name__)
 
 TICK_SECONDS = 5
-EXPIRY_EVERY_TICKS = 3      # 15 seconds
-HEARTBEAT_EVERY_TICKS = 6   # 30 seconds
+EXPIRY_EVERY_TICKS = 3        # 15 seconds
+HEARTBEAT_EVERY_TICKS = 6     # 30 seconds
+MAINTENANCE_EVERY_TICKS = 720  # hourly: backups if due, old rate-limit rows
+BACKUP_INTERVAL = timedelta(hours=24)
+LAST_BACKUP_KEY = "last_backup"
+
+
+async def daily_maintenance(bot) -> None:
+    """Back up the database once a day and prune stale API rate-limit windows."""
+    from sqlalchemy import delete
+
+    from database.database import AsyncSessionLocal, engine
+    from database.models import ApiRateCounter
+
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            delete(ApiRateCounter).where(ApiRateCounter.window_start < utcnow() - timedelta(hours=1))
+        )
+        await session.commit()
+
+    database_path = engine.url.database
+    if engine.dialect.name != "sqlite" or not database_path or database_path == ":memory:":
+        return
+    last = await app_settings.get_setting(LAST_BACKUP_KEY, fresh=True)
+    if last and utcnow() - as_utc(datetime.fromisoformat(last)) < BACKUP_INTERVAL:
+        return
+    try:
+        path = await asyncio.to_thread(backup_sqlite, database_path, BACKUP_DIR, BACKUP_KEEP_DAYS)
+    except Exception as exc:
+        logger.exception("Database backup failed")
+        await notify_admins(bot, f"⚠️ <b>Daily database backup failed</b>\n<code>{html.escape(str(exc))[:200]}</code>")
+        return
+    await app_settings.set_setting(LAST_BACKUP_KEY, utcnow().isoformat())
+    logger.info("Database backed up to %s", path)
 
 
 async def _run_step(name: str, step) -> None:
@@ -46,6 +81,8 @@ async def run_background_workers(bot) -> None:
                 await _run_step("supplier_timeouts", lambda: expire_stale_orders(bot))
             if tick % HEARTBEAT_EVERY_TICKS == 0:
                 await _run_step("heartbeat", app_settings.beat)
+            if tick % MAINTENANCE_EVERY_TICKS == 0:
+                await _run_step("daily_maintenance", lambda: daily_maintenance(bot))
             tick += 1
             await asyncio.sleep(TICK_SECONDS)
 

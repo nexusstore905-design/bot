@@ -1,0 +1,30 @@
+[project]
+name = "nexus-bot"
+version = "2.0.0"
+description = "Nexus Store Telegram bot and REST API"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 130
+target-version = "py310"
+extend-exclude = ["venv", ".venv", "backups"]
+
+[tool.ruff.lint]
+# Pyflakes, pycodestyle errors, import hygiene, bugbear, and pyupgrade.
+select = ["F", "E", "W", "I", "B", "UP"]
+ignore = [
+    "E501",   # long user-facing strings are clearer unwrapped
+    "B008",
+    "UP007",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["api", "bot", "config", "conftest", "database", "services", "utils"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:cacheprovider"
+filterwarnings = ["ignore::DeprecationWarning", "ignore::telegram.warnings.PTBUserWarning"]

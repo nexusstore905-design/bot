@@ -1,4 +1,4 @@
-"""Product catalog: groups, packages, prices, supplier routing, and cleanup."""
+"""Product catalog: groups, packages, supplier routing, and cleanup."""
 import re
 
 from telegram import Update
@@ -6,26 +6,34 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from bot.handlers.admin.common import admin_only, logger
 from bot.keyboards.admin_kb import (
-    admin_product_advanced_kb, admin_products_kb, cancel_conv_kb,
-    cleanup_removed_products_kb, remove_products_kb, reset_all_products_kb,
+    admin_product_advanced_kb,
+    admin_products_kb,
+    cancel_conv_kb,
+    cleanup_removed_products_kb,
+    remove_products_kb,
+    reset_all_products_kb,
 )
 from bot.states.states import (
-    ADMIN_ADD_CAT, ADMIN_ADD_NAME, ADMIN_EDIT_NAME_SELECT, ADMIN_EDIT_NAME_VALUE,
-    ADMIN_RENAME_GROUP_SELECT, ADMIN_RENAME_GROUP_VALUE, ADMIN_SET_PRICE, ADMIN_SET_SUPPLIER,
+    ADMIN_ADD_CAT,
+    ADMIN_ADD_NAME,
+    ADMIN_EDIT_NAME_SELECT,
+    ADMIN_EDIT_NAME_VALUE,
+    ADMIN_RENAME_GROUP_SELECT,
+    ADMIN_RENAME_GROUP_VALUE,
+    ADMIN_SET_SUPPLIER,
 )
 from database.database import AsyncSessionLocal
 from database.repositories.product_repo import ProductRepository
-from services import app_settings
 from services.audit import audit
 from utils.supplier_routing import resolve_supplier_chat
-from utils.ui import esc, money, panel
+from utils.ui import esc, panel
 
 
 @admin_only
 async def cb_admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.message.edit_text(
-        panel("Products", "Manage packages, prices, and supplier routing.", icon="🛍"),
+        panel("Products", "Manage packages and supplier routing.", icon="🛍"),
         reply_markup=admin_products_kb(),
         parse_mode="HTML",
     )
@@ -57,10 +65,9 @@ async def cb_list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    prices_note = "shown to customers" if await app_settings.show_prices() else "hidden from customers"
     lines = [
         "📦 <b>Active product groups and packages</b>\n──────────────",
-        f"Removed products hidden: <b>{deletable_count + preserved_count}</b> · prices {prices_note}\n",
+        f"Removed products hidden: <b>{deletable_count + preserved_count}</b>\n",
     ]
     category = None
     for product in products:
@@ -73,7 +80,7 @@ async def cb_list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if target_chat else "<i>not configured</i>"
         )
         lines.append(
-            f"✅ <code>#{product.id}</code>  {esc(product.name)} · {money(product.price)} → {supplier}"
+            f"✅ <code>#{product.id}</code>  {esc(product.name)} → {supplier}"
         )
     await update.callback_query.message.edit_text(
         "\n".join(lines), parse_mode="HTML", reply_markup=admin_products_kb()
@@ -135,7 +142,7 @@ async def cb_reset_all_products_start(update: Update, context: ContextTypes.DEFA
         f"Past orders that use these products: <b>{affected_orders}</b>\n"
         f"Historical product lines to detach: <b>{linked_items}</b>\n\n"
         "Past orders and their saved product names will stay visible. Their old product IDs will be cleared. "
-        "All products, prices and supplier group settings will be deleted, and the next product IDs will start at #1. "
+        "All products and supplier group settings will be deleted, and the next product IDs will start at #1. "
         "If another website uses product IDs, update those IDs after the reset. "
         "This cannot be undone.",
         parse_mode="HTML", reply_markup=reset_all_products_kb(),
@@ -236,8 +243,7 @@ async def admin_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ <b>Packages added to {esc(products[0].category)}</b>\n"
         f"──────────────\n"
         f"{chr(10).join(package_lines)}\n"
-        f"\nAdded: <b>{len(products)}</b>{skipped_note}{supplier_note}\n"
-        "Set prices in 💲 Prices if you show prices to customers.",
+        f"\nAdded: <b>{len(products)}</b>{skipped_note}{supplier_note}",
         parse_mode="HTML", reply_markup=admin_products_kb(),
     )
     context.user_data.pop("add_cat", None)
@@ -303,72 +309,6 @@ async def admin_rename_group_value(update: Update, context: ContextTypes.DEFAULT
     await update.message.reply_text(
         f"✅ Product group renamed to <b>{esc(result)}</b>.\n"
         f"Packages kept: <b>{count}</b>. Supplier settings were kept.",
-        parse_mode="HTML", reply_markup=admin_products_kb(),
-    )
-    return ConversationHandler.END
-
-
-# ─── Prices ───────────────────────────────────────────────────────────
-
-@admin_only
-async def cb_set_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    async with AsyncSessionLocal() as session:
-        products = await ProductRepository(session).get_all_active()
-    if not products:
-        await update.callback_query.message.edit_text("❌  No packages found. Add products first.", reply_markup=admin_products_kb())
-        return ConversationHandler.END
-    shown = await app_settings.show_prices()
-    lines = [
-        "💲 <b>Package prices</b>",
-        f"Customers {'<b>see</b>' if shown else 'do <b>not</b> see'} prices (toggle in Advanced settings).\n",
-        "Send one or more lines like <code>#3 | 9.99</code>. Use <code>#3 | -</code> to remove a price.\n",
-    ]
-    for product in products:
-        lines.append(
-            f"<code>#{product.id}</code> {esc(product.name)} ({esc(product.category)}) — {money(product.price)}"
-        )
-    await update.callback_query.message.edit_text(
-        "\n".join(lines), parse_mode="HTML", reply_markup=cancel_conv_kb(),
-    )
-    return ADMIN_SET_PRICE
-
-
-@admin_only
-async def admin_set_price_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    updates: list[tuple[int, float | None]] = []
-    for line in update.message.text.splitlines():
-        if not line.strip():
-            continue
-        match = re.fullmatch(r"\s*#?(\d+)\s*[|:=]\s*(-|[0-9]+(?:[.,][0-9]{1,2})?)\s*", line)
-        if not match:
-            await update.message.reply_text(
-                f"❌ Could not read <code>{esc(line.strip())}</code>. Use <code>#ID | 9.99</code> or <code>#ID | -</code>.",
-                parse_mode="HTML",
-            )
-            return ADMIN_SET_PRICE
-        price = None if match.group(2) == "-" else float(match.group(2).replace(",", "."))
-        if price is not None and price > 1_000_000:
-            await update.message.reply_text("❌ That price is too large.")
-            return ADMIN_SET_PRICE
-        updates.append((int(match.group(1)), price))
-    if not updates:
-        await update.message.reply_text("Send at least one line like <code>#3 | 9.99</code>.", parse_mode="HTML")
-        return ADMIN_SET_PRICE
-
-    results = []
-    async with AsyncSessionLocal() as session:
-        repo = ProductRepository(session)
-        for product_id, price in updates:
-            product = await repo.set_price(product_id, price)
-            if product is None:
-                results.append(f"❌ <code>#{product_id}</code> not found or removed")
-            else:
-                results.append(f"✅ <code>#{product.id}</code> {esc(product.name)} → {money(product.price)}")
-    await audit(update.effective_user, "set_prices", ", ".join(f"#{pid}={price}" for pid, price in updates))
-    await update.message.reply_text(
-        "💲 <b>Prices updated</b>\n\n" + "\n".join(results)
-        + "\n\nNew orders snapshot the price at checkout; old orders keep theirs.",
         parse_mode="HTML", reply_markup=admin_products_kb(),
     )
     return ConversationHandler.END

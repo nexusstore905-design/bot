@@ -2,8 +2,9 @@
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
-from bot.handlers.admin.common import admin_only, advanced_kb, logger
+from bot.handlers.admin.common import admin_only, advanced_kb, logger, team_only
 from bot.keyboards.admin_kb import admin_main_kb, reset_business_data_kb
+from bot.middlewares.auth_middleware import is_admin
 from config.settings import API_KEY
 from database.database import AsyncSessionLocal
 from database.repositories.business_data_repo import BusinessDataRepository
@@ -12,22 +13,26 @@ from services.audit import audit
 from utils.ui import panel
 
 
-@admin_only
+def _menu_text(user_id: int) -> str:
+    if is_admin(user_id):
+        return panel("Admin panel", "Manage orders, products, customers, and access.", icon="👑")
+    return panel("Team panel", "Handle orders and look up customers.", icon="🧑‍💼")
+
+
+@team_only
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     await update.message.reply_text(
-        panel("Admin panel", "Manage orders, products, customers, and access.", icon="👑"),
-        reply_markup=admin_main_kb(),
-        parse_mode="HTML",
+        _menu_text(user_id), reply_markup=admin_main_kb(is_admin(user_id)), parse_mode="HTML",
     )
 
 
-@admin_only
+@team_only
 async def cb_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
+    user_id = update.effective_user.id
     await update.callback_query.message.edit_text(
-        panel("Admin panel", "Choose an area to manage.", icon="👑"),
-        reply_markup=admin_main_kb(),
-        parse_mode="HTML",
+        _menu_text(user_id), reply_markup=admin_main_kb(is_admin(user_id)), parse_mode="HTML",
     )
 
 
@@ -35,7 +40,7 @@ async def cb_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_admin_advanced(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.message.edit_text(
-        panel("Advanced settings", "API stores, order limits, prices, and service availability.", icon="⚙️"),
+        panel("Advanced settings", "API stores, order limits, and service availability.", icon="⚙️"),
         reply_markup=await advanced_kb(),
         parse_mode="HTML",
     )
@@ -48,19 +53,6 @@ async def cb_toggle_power(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await audit(update.effective_user, "maintenance", "on" if turning_off else "off")
     await update.callback_query.answer(
         "🔴 Maintenance mode ON — customers are paused." if turning_off else "🟢 Service is back ON.",
-        show_alert=True,
-    )
-    await update.callback_query.message.edit_reply_markup(reply_markup=await advanced_kb())
-
-
-@admin_only
-async def cb_toggle_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    turning_on = not await app_settings.show_prices()
-    await app_settings.set_setting(app_settings.SHOW_PRICES, "on" if turning_on else None)
-    await audit(update.effective_user, "show_prices", "on" if turning_on else "off")
-    await update.callback_query.answer(
-        "💲 Customers now see package prices and totals." if turning_on
-        else "🙈 Prices are hidden from customers.",
         show_alert=True,
     )
     await update.callback_query.message.edit_reply_markup(reply_markup=await advanced_kb())
@@ -129,9 +121,9 @@ async def cb_admin_api_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔐 <b>Keys</b>  {key_status}\n"
         "<i>Send the key in the X-API-Key header. Store keys are shown once; rotate them in API stores.</i>\n\n"
         "<b>Endpoints</b>\n"
-        "<code>GET /products/</code>  Active products and prices\n"
-        "<code>POST /orders/</code>  Create an order (supports Idempotency-Key)\n"
-        "<code>GET /orders/{id}</code>  Order status and details\n"
+        "<code>GET /v1/products/</code>  Active products\n"
+        "<code>POST /v1/orders/</code>  Create an order (supports Idempotency-Key)\n"
+        "<code>GET /v1/orders/{id}</code>  Order status and details\n"
         "<code>GET /health</code>  Database and bot status\n\n"
         "Stores can also receive signed status webhooks.",
         parse_mode="HTML",
@@ -141,13 +133,15 @@ async def cb_admin_api_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text("✖  Cancelled.", reply_markup=admin_main_kb())
+    await update.message.reply_text("✖  Cancelled.", reply_markup=admin_main_kb(is_admin(update.effective_user.id)))
     return ConversationHandler.END
 
 
 async def cb_admin_cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.message.edit_text("✖  Operation cancelled.", reply_markup=admin_main_kb())
+        await update.callback_query.message.edit_text(
+            "✖  Operation cancelled.", reply_markup=admin_main_kb(is_admin(update.effective_user.id)),
+        )
     context.user_data.clear()
     return ConversationHandler.END

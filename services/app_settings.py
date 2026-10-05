@@ -14,7 +14,6 @@ CACHE_SECONDS = 5.0
 _cache: dict[str, tuple[float, str | None]] = {}
 
 MAINTENANCE = "maintenance"
-SHOW_PRICES = "show_prices"
 BOT_HEARTBEAT = "bot_heartbeat"
 
 
@@ -44,10 +43,6 @@ async def set_setting(key: str, value: str | None) -> None:
 
 async def is_maintenance() -> bool:
     return await get_setting(MAINTENANCE) == "on"
-
-
-async def show_prices() -> bool:
-    return await get_setting(SHOW_PRICES) == "on"
 
 
 async def beat() -> None:

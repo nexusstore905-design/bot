@@ -1,149 +1,178 @@
-"""Inline menus shown to customers."""
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+"""Inline menus shown to customers, in their language."""
+from telegram import InlineKeyboardButton as Button
+from telegram import InlineKeyboardMarkup
+
+from bot.i18n import LANGUAGES, t
+
+CATALOG_PAGE_SIZE = 10
 
 
-def _price_label(amount: float | None) -> str:
-    from config.settings import CURRENCY
-    return f" · {amount:,.2f} {CURRENCY}" if amount is not None else ""
+def _grid(buttons: list[Button], columns: int = 2) -> list[list[Button]]:
+    return [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
 
 
-def main_menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✨  New order", callback_data="order_start")],
-        [InlineKeyboardButton("📦  My orders", callback_data="my_orders"),
-         InlineKeyboardButton("💰  Balance", callback_data="balance")],
-        [InlineKeyboardButton("🆘  Support", callback_data="support"),
-         InlineKeyboardButton("💬  Help", callback_data="help")],
-        [InlineKeyboardButton("🏪  About", callback_data="about"),
-         InlineKeyboardButton("🔓  Sign out", callback_data="logout")],
+def _pager(prefix: str, page: int, total: int, page_size: int) -> list[Button]:
+    pages = max(1, (total + page_size - 1) // page_size)
+    if pages <= 1:
+        return []
+    row = []
+    if page > 0:
+        row.append(Button("◀", callback_data=f"{prefix}:{page - 1}"))
+    row.append(Button(f"{page + 1}/{pages}", callback_data="noop"))
+    if page + 1 < pages:
+        row.append(Button("▶", callback_data=f"{prefix}:{page + 1}"))
+    return row
+
+
+def main_menu_kb(lang: str | None = None, reorder_order_id: str | None = None) -> InlineKeyboardMarkup:
+    rows = [[Button(t(lang, "btn_new_order"), callback_data="order_start")]]
+    second = [Button(t(lang, "btn_my_orders"), callback_data="my_orders")]
+    if reorder_order_id:
+        second.append(Button(t(lang, "btn_reorder"), callback_data=f"reorder:{reorder_order_id}"))
+    rows.append(second)
+    rows.append([
+        Button(t(lang, "btn_balance"), callback_data="balance"),
+        Button(t(lang, "btn_support"), callback_data="support"),
     ])
+    rows.append([
+        Button(t(lang, "btn_help"), callback_data="help"),
+        Button(t(lang, "btn_language"), callback_data="language"),
+    ])
+    return InlineKeyboardMarkup(rows)
 
 
-def back_to_menu_kb() -> InlineKeyboardMarkup:
+def back_to_menu_kb(lang: str | None = None) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[Button(t(lang, "btn_menu"), callback_data="main_menu")]])
+
+
+def language_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("🏠  Main Menu", callback_data="main_menu")
+        Button(label, callback_data=f"set_lang:{code}") for code, label in LANGUAGES.items()
     ]])
 
 
-def categories_kb(categories: list[str]) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(f"🎮  {c}", callback_data=f"cat:{c}")]
-        for c in categories
-    ]
+def _cart_button(lang, cart: list | None) -> list[Button]:
+    if not cart:
+        return []
+    count = sum(int(item.get("quantity", 1)) for item in cart)
+    return [Button(t(lang, "btn_cart", count=count), callback_data="cart_view")]
+
+
+def categories_kb(categories: list[str], lang: str | None, cart: list | None = None, page: int = 0) -> InlineKeyboardMarkup:
+    start = page * CATALOG_PAGE_SIZE
+    visible = categories[start:start + CATALOG_PAGE_SIZE]
+    rows = _grid([Button(f"🎮 {category}", callback_data=f"cat:{category}") for category in visible], 1)
+    pager = _pager("cat_page", page, len(categories), CATALOG_PAGE_SIZE)
+    if pager:
+        rows.append(pager)
+    if cart:
+        rows.append(_cart_button(lang, cart))
     rows.append([
-        InlineKeyboardButton("🏠  Menu", callback_data="main_menu"),
-        InlineKeyboardButton("✖  Cancel", callback_data="cancel_order"),
+        Button(t(lang, "btn_menu"), callback_data="main_menu"),
+        Button(t(lang, "btn_cancel"), callback_data="cancel_order"),
     ])
     return InlineKeyboardMarkup(rows)
 
 
-def products_kb(products: list, show_prices: bool = False) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(
-            f"💎  {p.name}{_price_label(p.price) if show_prices else ''}",
-            callback_data=f"prod:{p.id}"
-        )]
-        for p in products
-    ]
+def products_kb(
+    products: list, lang: str | None, cart: list | None = None, page: int = 0, back: str = "order_start",
+) -> InlineKeyboardMarkup:
+    page_size = CATALOG_PAGE_SIZE * 2
+    start = page * page_size
+    visible = products[start:start + page_size]
+    rows = _grid([Button(f"💎 {product.name}", callback_data=f"prod:{product.id}") for product in visible])
+    pager = _pager("prod_page", page, len(products), page_size)
+    if pager:
+        rows.append(pager)
+    if cart:
+        rows.append(_cart_button(lang, cart))
     rows.append([
-        InlineKeyboardButton("◀  Product groups", callback_data="order_start"),
-        InlineKeyboardButton("✖  Cancel", callback_data="cancel_order"),
+        Button(t(lang, "btn_products"), callback_data=back),
+        Button(t(lang, "btn_cancel"), callback_data="cancel_order"),
     ])
     return InlineKeyboardMarkup(rows)
 
 
-def quantity_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("1️⃣", callback_data="qty:1"),
-         InlineKeyboardButton("2️⃣", callback_data="qty:2"),
-         InlineKeyboardButton("3️⃣", callback_data="qty:3")],
-        [InlineKeyboardButton("4️⃣", callback_data="qty:4"),
-         InlineKeyboardButton("5️⃣", callback_data="qty:5"),
-         InlineKeyboardButton("🔟", callback_data="qty:10")],
-        [InlineKeyboardButton("◀  Product packages", callback_data="back_products"),
-         InlineKeyboardButton("✖  Cancel", callback_data="cancel_order")],
+def quantity_kb(lang: str | None) -> InlineKeyboardMarkup:
+    numbers = [1, 2, 3, 4, 5, 10]
+    rows = _grid([Button(str(n), callback_data=f"qty:{n}") for n in numbers], 3)
+    rows.append([
+        Button(t(lang, "btn_packages"), callback_data="back_products"),
+        Button(t(lang, "btn_cancel"), callback_data="cancel_order"),
     ])
+    return InlineKeyboardMarkup(rows)
 
 
-def cart_kb(cart: list[dict] | None = None) -> InlineKeyboardMarkup:
+def cart_kb(cart: list[dict], lang: str | None) -> InlineKeyboardMarkup:
     rows = []
-    for index, item in enumerate(cart or []):
+    for index, item in enumerate(cart):
         name = str(item.get("product_name", "Package"))
         if len(name) > 18:
             name = name[:17] + "…"
         quantity = int(item.get("quantity", 1))
+        rows.append([Button(f"📦 {name}", callback_data=f"cart_item:{index}")])
         rows.append([
-            InlineKeyboardButton(f"📦 {name} ×{quantity}", callback_data=f"cart_item:{index}"),
+            Button("−", callback_data=f"cart_qty:{index}:{max(1, quantity - 1)}"),
+            Button(t(lang, "btn_qty", qty=quantity), callback_data=f"cart_item:{index}"),
+            Button("+", callback_data=f"cart_qty:{index}:{min(99, quantity + 1)}"),
+            Button("🗑", callback_data=f"cart_remove:{index}"),
         ])
-        rows.append([
-            InlineKeyboardButton("−", callback_data=f"cart_qty:{index}:{max(1, quantity - 1)}"),
-            InlineKeyboardButton(f"Qty {quantity}", callback_data=f"cart_item:{index}"),
-            InlineKeyboardButton("+", callback_data=f"cart_qty:{index}:{min(99, quantity + 1)}"),
-            InlineKeyboardButton("🗑 Remove", callback_data=f"cart_remove:{index}"),
-        ])
-    rows.extend([
-        [InlineKeyboardButton("✅  Continue to checkout", callback_data="cart_checkout")],
-        [InlineKeyboardButton("➕  Add another item", callback_data="order_start")],
-        [InlineKeyboardButton("🗑  Clear cart", callback_data="cart_clear"),
-         InlineKeyboardButton("✖  Cancel", callback_data="cancel_order")],
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-def saved_player_ids_kb(saved: list) -> InlineKeyboardMarkup | None:
-    if not saved:
-        return None
-    rows = [
-        [InlineKeyboardButton(f"🎮  {item.player_id}", callback_data=f"use_pid:{item.id}")]
-        for item in saved
-    ]
+    rows.append([Button(t(lang, "btn_checkout"), callback_data="cart_checkout")])
     rows.append([
-        InlineKeyboardButton("🗑  Forget saved IDs", callback_data="forget_pids"),
-        InlineKeyboardButton("✖  Cancel", callback_data="cancel_order"),
+        Button(t(lang, "btn_add_more"), callback_data="order_start"),
+        Button(t(lang, "btn_clear_cart"), callback_data="cart_clear"),
     ])
     return InlineKeyboardMarkup(rows)
 
 
-def confirm_order_kb() -> InlineKeyboardMarkup:
+def saved_player_ids_kb(saved: list, lang: str | None) -> InlineKeyboardMarkup:
+    rows = _grid([Button(f"🎮 {item.player_id}", callback_data=f"use_pid:{item.id}") for item in saved])
+    if saved:
+        rows.append([Button(t(lang, "btn_forget_pids"), callback_data="forget_pids")])
+    rows.append([Button(t(lang, "btn_cancel"), callback_data="cancel_order")])
+    return InlineKeyboardMarkup(rows)
+
+
+def confirm_order_kb(lang: str | None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀  Submit order", callback_data="confirm_order")],
-        [InlineKeyboardButton("↩️  Start over", callback_data="reset_order_products")],
-        [InlineKeyboardButton("✏️  Change Player ID", callback_data="edit_player_id"),
-         InlineKeyboardButton("✖  Cancel", callback_data="cancel_order")],
+        [Button(t(lang, "btn_submit"), callback_data="confirm_order")],
+        [
+            Button(t(lang, "btn_change_pid"), callback_data="edit_player_id"),
+            Button(t(lang, "btn_start_over"), callback_data="reset_order_products"),
+        ],
+        [Button(t(lang, "btn_cancel"), callback_data="cancel_order")],
     ])
 
 
-def order_status_kb(order_id: str, page: int = 0, terminal: bool = False) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton("🔄  Refresh status", callback_data=f"refresh_order:{order_id}:{page}")]]
+def order_status_kb(order_id: str, lang: str | None = None, terminal: bool = False, page: int = 0) -> InlineKeyboardMarkup:
+    first = [Button(t(lang, "btn_refresh"), callback_data=f"refresh_order:{order_id}:{page}")]
     if terminal:
-        rows.append([InlineKeyboardButton("🔁  Order again", callback_data=f"reorder:{order_id}")])
-    rows.append([InlineKeyboardButton("🆘  Get help with this order", callback_data=f"support:{order_id}")])
-    rows.append([
-        InlineKeyboardButton("📋  My orders", callback_data=f"my_orders_page:{page}"),
-        InlineKeyboardButton("🏠  Menu", callback_data="main_menu"),
+        first.append(Button(t(lang, "btn_reorder"), callback_data=f"reorder:{order_id}"))
+    return InlineKeyboardMarkup([
+        first,
+        [
+            Button(t(lang, "btn_get_help"), callback_data=f"support:{order_id}"),
+            Button(t(lang, "btn_my_orders"), callback_data=f"my_orders_page:{page}"),
+        ],
+        [Button(t(lang, "btn_menu"), callback_data="main_menu")],
     ])
-    return InlineKeyboardMarkup(rows)
 
 
-def my_orders_kb(orders: list, page: int, total: int, page_size: int = 5) -> InlineKeyboardMarkup:
-    rows = []
-    for order in orders:
-        rows.append([InlineKeyboardButton(
-            f"{order.order_id} · {order.status.value.title()}",
+def my_orders_kb(orders: list, page: int, total: int, lang: str | None, page_size: int = 5) -> InlineKeyboardMarkup:
+    from services.messages import STATUS_ICONS
+    rows = [
+        [Button(
+            f"{STATUS_ICONS.get(order.status.value, '•')} {order.order_id}",
             callback_data=f"view_order:{order.order_id}:{page}",
-        )])
-
-    page_count = max(1, (total + page_size - 1) // page_size)
-    navigation = []
-    if page > 0:
-        navigation.append(InlineKeyboardButton("◀ Previous", callback_data=f"my_orders_page:{page - 1}"))
-    if page + 1 < page_count:
-        navigation.append(InlineKeyboardButton("Next ▶", callback_data=f"my_orders_page:{page + 1}"))
-    if navigation:
-        rows.append(navigation)
-    rows.append([InlineKeyboardButton("🏠  Main menu", callback_data="main_menu")])
+        )]
+        for order in orders
+    ]
+    pager = _pager("my_orders_page", page, total, page_size)
+    if pager:
+        rows.append(pager)
+    rows.append([Button(t(lang, "btn_menu"), callback_data="main_menu")])
     return InlineKeyboardMarkup(rows)
 
 
-def support_cancel_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("✖  Cancel", callback_data="support_cancel")]])
+def support_cancel_kb(lang: str | None) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[Button(t(lang, "btn_cancel"), callback_data="support_cancel")]])

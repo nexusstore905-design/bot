@@ -6,7 +6,7 @@ from config.settings import SUPPLIER_TIMEOUT_MINUTES
 from database.database import AsyncSessionLocal
 from database.models import OrderStatus
 from database.repositories.order_repo import OrderRepository
-from services.notify import announce_order_status, close_supplier_message, notify_admins
+from services.notify import announce_order_status, close_supplier_message, notify_team
 from utils.helpers import utcnow
 from utils.ui import esc
 
@@ -33,22 +33,13 @@ async def expire_stale_orders(bot) -> int:
             await close_supplier_message(bot, chat_id, message_id, supplier_text)
 
         if info.status == OrderStatus.cancelled:
-            headline = (
-                "⏱️ <b>Order auto-cancelled</b>\n"
-                f"The supplier did not respond within {minutes} minutes. You can order again anytime."
-            )
+            await announce_order_status(bot, info.order_id, "n_auto_cancel", minutes=minutes)
         elif info.status == OrderStatus.failed:
-            headline = (
-                "⚠️ <b>Part of your order timed out</b>\n"
-                f"Completed: {esc(', '.join(info.completed_categories))}. "
-                "Support has been notified about the rest."
+            await announce_order_status(
+                bot, info.order_id, "n_partial_timeout", done=", ".join(info.completed_categories),
             )
         else:
-            headline = (
-                "⚠️ <b>One supplier group timed out</b>\n"
-                "The rest of your order is still being processed."
-            )
-        await announce_order_status(bot, info.order_id, headline=headline)
+            await announce_order_status(bot, info.order_id, "n_group_timeout")
 
         line = f"• <code>{esc(info.order_id)}</code> → <b>{info.status.value.upper()}</b>"
         line += f" · timed out: {esc(', '.join(info.timed_out_categories) or 'whole order')}"
@@ -56,7 +47,7 @@ async def expire_stale_orders(bot) -> int:
             line += f" · completed: {esc(', '.join(info.completed_categories))}"
         summary_lines.append(line)
 
-    await notify_admins(
+    await notify_team(
         bot,
         f"⏱️ <b>SUPPLIER TIMEOUTS</b> ({len(expired)})\n\n" + "\n".join(summary_lines[:30])
         + ("\n…" if len(summary_lines) > 30 else "")

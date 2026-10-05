@@ -51,7 +51,7 @@ async def _send_broadcast(bot, admin_chat_id: int, from_chat_id: int, message_id
         recipients = await UserRepository(session).get_broadcast_recipients(exclude=ADMIN_IDS)
     sent = blocked = failed = 0
     for telegram_id in recipients:
-        for attempt in range(2):
+        for _attempt in range(2):
             try:
                 await bot.copy_message(chat_id=telegram_id, from_chat_id=from_chat_id, message_id=message_id)
                 sent += 1

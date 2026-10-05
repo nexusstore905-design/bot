@@ -3,7 +3,13 @@ import pytest
 
 import api.flask_app as flask_app
 from conftest import (
-    SUPPLIER_A, FakeBot, make_product, make_store, make_user, run, sql,
+    SUPPLIER_A,
+    FakeBot,
+    make_product,
+    make_store,
+    make_user,
+    run,
+    sql,
 )
 from database.database import AsyncSessionLocal
 from database.repositories.api_store_repo import ApiStoreRepository
@@ -36,7 +42,7 @@ def post_order(client, key, body, idem=None):
 
 def test_store_order_is_created_delivered_and_scoped(client, bot):
     run(make_user(111))
-    product = run(make_product(price=0.99))
+    product = run(make_product())
     _, key = run(make_store("A"))
     _, other_key = run(make_store("B"))
 
@@ -45,7 +51,6 @@ def test_store_order_is_created_delivered_and_scoped(client, bot):
     body = response.get_json()
     assert body["status"] == "pending"
     assert body["supplier_notified"] is True and body["delivery"] == "sent"
-    assert body["unit_price"] == 0.99
     assert len(bot.sent_to(SUPPLIER_A)) == 1
 
     assert client.get(f"/orders/{body['order_id']}", headers={"X-API-Key": key}).status_code == 200
@@ -143,14 +148,24 @@ def test_cors_only_for_listed_origins(client):
     assert "Access-Control-Allow-Origin" not in client.get("/", headers={"Origin": "https://evil.example"}).headers
 
 
-def test_products_hide_prices_unless_enabled(client):
-    run(make_product(price=4.99))
+def test_products_and_v1_routes(client):
+    run(make_product(name="660 UC"))
     _, key = run(make_store())
-    hidden = client.get("/products/", headers={"X-API-Key": key}).get_json()["products"]
-    assert hidden[0]["price"] is None
-    run(app_settings.set_setting(app_settings.SHOW_PRICES, "on"))
-    shown = client.get("/products/", headers={"X-API-Key": key}).get_json()["products"]
-    assert shown[0]["price"] == 4.99
+    for path in ("/v1/products/", "/products/"):
+        products = client.get(path, headers={"X-API-Key": key}).get_json()["products"]
+        assert products == [{"product_id": products[0]["product_id"], "category": "PUBG UC", "name": "660 UC"}]
+
+
+def test_rate_limit_returns_429_with_retry_after(client, monkeypatch):
+    monkeypatch.setattr(flask_app, "API_RATE_LIMIT_PER_MINUTE", 3)
+    _, key = run(make_store())
+    statuses = [client.get("/v1/products/", headers={"X-API-Key": key}).status_code for _ in range(4)]
+    assert statuses == [200, 200, 200, 429]
+    limited = client.get("/v1/products/", headers={"X-API-Key": key})
+    assert 0 < int(limited.headers["Retry-After"]) <= 60
+    # A different key has its own budget.
+    _, other_key = run(make_store("Other"))
+    assert client.get("/v1/products/", headers={"X-API-Key": other_key}).status_code == 200
 
 
 def test_failed_first_delivery_is_retried_not_failed(client, monkeypatch):

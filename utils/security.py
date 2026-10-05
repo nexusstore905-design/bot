@@ -2,7 +2,6 @@ import hashlib
 import hmac
 import secrets
 
-
 API_KEY_PREFIX_LENGTH = 12
 
 
@@ -24,5 +23,5 @@ def generate_webhook_secret() -> str:
 
 
 def sign_webhook(secret: str, timestamp: int, body: bytes) -> str:
-    message = f"{timestamp}.".encode("utf-8") + body
+    message = f"{timestamp}.".encode() + body
     return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()

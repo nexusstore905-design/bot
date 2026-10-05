@@ -1,4 +1,5 @@
 import os
+
 from dotenv import load_dotenv
 from sqlalchemy.engine import make_url
 
@@ -22,10 +23,12 @@ def _int_list(key: str, default: str = "") -> list[int]:
 
 
 BOT_TOKEN: str = _require("BOT_TOKEN")
+# Owners: full control. Staff: day-to-day order and customer handling only.
 ADMIN_IDS: list[int] = _int_list("ADMIN_IDS")
+STAFF_IDS: list[int] = [tid for tid in _int_list("STAFF_IDS") if tid not in ADMIN_IDS]
+TEAM_IDS: list[int] = ADMIN_IDS + STAFF_IDS
 SUPPLIER_CHAT_ID: int = int(os.getenv("SUPPLIER_CHAT_ID", "0"))
 STORE_NAME: str = os.getenv("STORE_NAME", "Nexus Store")
-CURRENCY: str = os.getenv("CURRENCY", "USDT")
 BINANCE_ID: str = os.getenv("BINANCE_ID", "")
 MAX_PIN_ATTEMPTS: int = int(os.getenv("MAX_PIN_ATTEMPTS", "5"))
 LOCKOUT_MINUTES: int = int(os.getenv("LOCKOUT_MINUTES", "30"))
@@ -55,7 +58,12 @@ SQLITE_JOURNAL_MODE: str = os.getenv("SQLITE_JOURNAL_MODE", "DELETE").strip().up
 # Minutes a supplier group has to act on an order part after it was delivered.
 SUPPLIER_TIMEOUT_MINUTES: int = max(1, int(os.getenv("SUPPLIER_TIMEOUT_MINUTES", "10")))
 
+# Daily database backups kept in BACKUP_DIR by the bot task.
+BACKUP_DIR: str = os.getenv("BACKUP_DIR", os.path.join(BASE_DIR, "backups"))
+BACKUP_KEEP_DAYS: int = max(1, int(os.getenv("BACKUP_KEEP_DAYS", "7")))
+
 # REST API
+API_RATE_LIMIT_PER_MINUTE: int = max(1, int(os.getenv("API_RATE_LIMIT_PER_MINUTE", "60")))
 API_KEY: str = os.getenv("API_KEY", "").strip()
 if API_KEY == "change-this-to-a-secret-key":
     API_KEY = ""

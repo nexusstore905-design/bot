@@ -1,48 +1,70 @@
 """
-Auth handler — professional UI with invite-code access system.
+Sign-in with invite codes, including one-tap invite links (t.me/<bot>?start=CODE).
 """
-import html
 import logging
+
 from telegram import Update
 from telegram.ext import (
-    ContextTypes, ConversationHandler,
-    CommandHandler, MessageHandler, filters,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
 )
 
-from database.database import AsyncSessionLocal
-from database.repositories.user_repo import UserRepository
-from database.models import AuthStatus
+from bot.handlers.home import send_home
+from bot.i18n import t
+from bot.keyboards.customer_kb import language_kb
+from bot.middlewares.auth_middleware import is_admin, is_team, user_language
 from bot.states.states import ENTER_PIN
-from bot.keyboards.customer_kb import main_menu_kb, back_to_menu_kb
-from bot.middlewares.auth_middleware import is_admin, require_callback_auth
 from config.settings import STORE_NAME
-from utils.ui import panel
+from database.database import AsyncSessionLocal
+from database.models import AuthStatus
+from database.repositories.user_repo import UserRepository
+from utils.helpers import utcnow
+from utils.ui import esc, header, quote
 
 logger = logging.getLogger(__name__)
 
-BRAND = f"✨ <b>{html.escape(STORE_NAME.strip().upper(), quote=False)}</b> ✨"
 
-
-def _welcome_text(name: str, returning: bool = False) -> str:
-    safe_name = html.escape(name, quote=False)
-    greeting = "Welcome back" if returning else "Welcome"
-    return panel(
-        STORE_NAME.strip().upper(),
-        "<i>Your order and tracking center</i>\n\n"
-        f"👋 {greeting}, <b>{safe_name}</b>!\n\n"
-        "Choose an option below to get started.",
-        icon="✨",
+def signin_text(lang: str) -> str:
+    return (
+        f"{header('✨', STORE_NAME.strip())}\n\n"
+        f"{t(lang, 'signin_title')}\n{t(lang, 'signin_body')}\n\n"
+        f"<i>{t(lang, 'signin_note')}</i>"
     )
+
+
+async def _attempt_code(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
+    user = update.effective_user
+    async with AsyncSessionLocal() as session:
+        repo = UserRepository(session)
+        db_user = await repo.get_or_create(user.id, user.username, user.full_name)
+        success, key, params = await repo.try_register_with_code(db_user, code)
+        lang = db_user.language or user_language(context, user)
+        if success and not db_user.language:
+            await repo.set_language(db_user, lang)
+    context.user_data["lang"] = lang
+
+    if success:
+        await send_home(update, context, returning=False, notice=t(lang, "signin_ok", name=user.first_name or ""))
+        return ConversationHandler.END
+    await update.effective_chat.send_message(
+        f"{t(lang, 'code_failed')}\n{quote(t(lang, key, **params))}", parse_mode="HTML",
+    )
+    if key in ("code_locked", "access_revoked"):
+        return ConversationHandler.END
+    return ENTER_PIN
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
-    if is_admin(user.id):
+    if is_team(user.id):
+        role = "an <b>owner</b>" if is_admin(user.id) else "<b>staff</b>"
         await update.message.reply_text(
-            f"{BRAND}\n\n"
-            f"👋  Hello, <b>{html.escape(user.first_name, quote=False)}</b>!\n\n"
-            "You are signed in as an <b>administrator</b>.\n"
+            f"{header('✨', STORE_NAME.strip())}\n\n"
+            f"👋 Hello, <b>{esc(user.first_name)}</b>. You're signed in as {role}.\n"
             "Send /admin to open the control panel.",
             parse_mode="HTML",
         )
@@ -51,188 +73,70 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with AsyncSessionLocal() as session:
         repo = UserRepository(session)
         db_user = await repo.get_or_create(user.id, user.username, user.full_name)
+        if db_user.language:
+            context.user_data["lang"] = db_user.language
+        lang = user_language(context, user)
 
         if db_user.auth_status == AuthStatus.revoked:
-            await update.message.reply_text(
-                "⛔ <b>Access unavailable</b>\n\n"
-                "Your account cannot use this bot right now.\n"
-                "Please contact the administrator.",
-                parse_mode="HTML",
-            )
+            await update.message.reply_text(t(lang, "access_revoked"))
             return ConversationHandler.END
-
         if await repo.is_locked(db_user):
-            import datetime
-            from datetime import timezone
-            remaining = int((db_user.locked_until - datetime.datetime.now(timezone.utc)).total_seconds() // 60) + 1
-            await update.message.reply_text(
-                "🔒 <b>Try again later</b>\n\n"
-                f"There were too many incorrect codes. Try again in <b>{remaining} minute(s)</b>.",
-                parse_mode="HTML",
-            )
+            minutes = int((db_user.locked_until - utcnow()).total_seconds() // 60) + 1
+            await update.message.reply_text(t(lang, "account_locked", minutes=minutes))
             return ConversationHandler.END
+        signed_in = await repo.is_session_valid(db_user)
 
-        if await repo.is_session_valid(db_user):
-            await _show_main_menu(update, user.first_name, returning=True)
-            return ConversationHandler.END
+    if signed_in:
+        await send_home(update, context)
+        return ConversationHandler.END
 
-    await update.message.reply_text(
-        f"{BRAND}\n\n"
-        "🔐 <b>Member sign in</b>\n\n"
-        "This bot is available to invited members.\n"
-        "Enter the one-time access code from your administrator.\n\n"
-        "<i>Your code message is deleted after submission.</i>",
-        parse_mode="HTML",
-    )
+    # One-tap invite link: /start CODE
+    if context.args:
+        return await _attempt_code(update, context, context.args[0])
+
+    await update.message.reply_text(signin_text(lang), parse_mode="HTML", reply_markup=language_kb())
     return ENTER_PIN
 
 
 async def handle_code_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
     code_input = update.message.text.strip()
-
     try:
         await update.message.delete()
     except Exception:
         pass
+    return await _attempt_code(update, context, code_input)
 
+
+async def _sign_out(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    user = update.effective_user
+    lang = user_language(context, user)
     async with AsyncSessionLocal() as session:
         repo = UserRepository(session)
-        db_user = await repo.get_or_create(user.id, user.username, user.full_name)
-        success, message = await repo.try_register_with_code(db_user, code_input)
-
-    if success:
-        await update.effective_chat.send_message(
-            f"✅ <b>You're in!</b>\n\n"
-            f"Welcome to <b>{html.escape(STORE_NAME, quote=False)}</b>, "
-            f"<b>{html.escape(user.first_name, quote=False)}</b>.",
-            parse_mode="HTML",
-        )
-        await _show_main_menu_chat(update.effective_chat.id, context, user.first_name)
-        return ConversationHandler.END
-    else:
-        await update.effective_chat.send_message(
-            "❌ <b>That code did not work</b>\n\n"
-            f"<code>{html.escape(message, quote=False)}</code>",
-            parse_mode="HTML",
-        )
-        if "locked" in message.lower() or "revoked" in message.lower():
-            return ConversationHandler.END
-        return ENTER_PIN
+        db_user = await repo.get_by_telegram_id(user.id)
+        if db_user:
+            await repo.logout(db_user)
+    context.user_data.clear()
+    context.user_data["lang"] = lang
+    return t(lang, "signed_out")
 
 
 async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if is_admin(user.id):
-        await update.message.reply_text("ℹ️  Admins do not use sessions.")
+    if is_team(update.effective_user.id):
+        await update.message.reply_text("ℹ️  The team doesn't use sign-in sessions.")
         return
-
-    async with AsyncSessionLocal() as session:
-        repo = UserRepository(session)
-        db_user = await repo.get_by_telegram_id(user.id)
-        if db_user:
-            await repo.logout(db_user)
-
-    context.user_data.clear()
-    await update.message.reply_text(
-        "🔓 <b>Signed out</b>\n\n"
-        "Send /start whenever you want to sign in again.",
-        parse_mode="HTML",
-    )
-
-
-async def _show_main_menu(update: Update, name: str, returning: bool = False):
-    await update.message.reply_text(
-        _welcome_text(name, returning),
-        reply_markup=main_menu_kb(),
-        parse_mode="HTML",
-    )
-
-
-async def _show_main_menu_chat(chat_id: int, context: ContextTypes.DEFAULT_TYPE, name: str = ""):
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=(
-            _welcome_text(name) if name else
-            f"{BRAND}\n\nChoose an option below to get started."
-        ),
-        reply_markup=main_menu_kb(),
-        parse_mode="HTML",
-    )
-
-
-async def cb_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_callback_auth(update, context):
-        return
-    await update.callback_query.message.edit_text(
-        _welcome_text(update.effective_user.first_name, returning=True),
-        reply_markup=main_menu_kb(),
-        parse_mode="HTML",
-    )
+    await update.message.reply_text(await _sign_out(update, context), parse_mode="HTML")
 
 
 async def cb_logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
     await update.callback_query.answer()
-    async with AsyncSessionLocal() as session:
-        repo = UserRepository(session)
-        db_user = await repo.get_by_telegram_id(user.id)
-        if db_user:
-            await repo.logout(db_user)
-    context.user_data.clear()
-    await update.callback_query.message.edit_text(
-        "🔓 <b>Signed out</b>\n\n"
-        "Send /start whenever you want to sign in again.",
-        parse_mode="HTML",
-    )
-
-
-async def cb_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_callback_auth(update, context):
-        return
-    await update.callback_query.message.edit_text(
-        "💬 <b>Help and order guide</b>\n\n"
-        "<b>Place an order</b>\n"
-        "1. Choose a category and package.\n"
-        "2. Select the quantity.\n"
-        "3. Enter your Player ID (or tap a recent one).\n"
-        "4. Review the details and submit.\n\n"
-        "We will message you when the order status changes. "
-        "Finished orders have an 🔁 <b>Order again</b> button.\n\n"
-        "<b>Status guide</b>\n"
-        "⏳ Pending · waiting for the supplier\n"
-        "⚙️ Processing · part of the order is done\n"
-        "✅ Completed · order is finished\n"
-        "❌ Failed · support will follow up\n"
-        "🚫 Cancelled · not processed; you can order again\n\n"
-        "Need help? Tap 🆘 <b>Support</b> in the menu.\n"
-        "Commands: /start · /myorders · /logout",
-        parse_mode="HTML",
-        reply_markup=back_to_menu_kb(),
-    )
-
-
-async def cb_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_callback_auth(update, context):
-        return
-    await update.callback_query.message.edit_text(
-        f"🏪 <b>About {html.escape(STORE_NAME, quote=False)}</b>\n\n"
-        "Use this bot to submit orders and follow their progress.\n\n"
-        "📦 Choose a product and enter the correct player ID.\n"
-        "📬 Order updates arrive here in Telegram.\n"
-        "🤝 Orders are sent to the supplier assigned to the product category.",
-        parse_mode="HTML",
-        reply_markup=back_to_menu_kb(),
-    )
+    await update.callback_query.message.edit_text(await _sign_out(update, context), parse_mode="HTML")
 
 
 def get_auth_conversation() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[CommandHandler("start", cmd_start)],
         states={
-            ENTER_PIN: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_code_entry)
-            ],
+            ENTER_PIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_code_entry)],
         },
         fallbacks=[CommandHandler("start", cmd_start)],
         allow_reentry=True,

@@ -1,41 +1,57 @@
 """
 Auth middleware — verifies every update before it reaches handlers.
-Unauthenticated users are redirected to the PIN entry flow.
+Unauthenticated users are redirected to the access-code sign-in flow.
 """
-from telegram import Update
-from telegram.ext import ContextTypes
 import time
 from collections import OrderedDict
 
-from database.database import AsyncSessionLocal
-from database.repositories.user_repo import UserRepository
-from database.models import AuthStatus
-from config.settings import ADMIN_IDS
-from services import app_settings
+from telegram import Update
+from telegram.ext import ContextTypes
 
-# Inbound Anti-Flood memory (User ID -> Timestamp)
+from bot.i18n import guess_language, normalize, t
+from config.settings import ADMIN_IDS, STAFF_IDS
+from database.database import AsyncSessionLocal
+from database.models import AuthStatus
+from database.repositories.user_repo import UserRepository
+from services import app_settings
+from utils.helpers import utcnow
+
+# Inbound anti-flood memory (user ID -> timestamp)
 USER_LAST_REQUEST: OrderedDict[int, float] = OrderedDict()
 REQUEST_WINDOW_SECONDS = 60.0
 REQUEST_CACHE_MAX_USERS = 4096
+MIN_SECONDS_BETWEEN_ACTIONS = 0.5
 
-async def require_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """
-    Check authentication for any update.
-    Returns True if authenticated, False otherwise.
-    If not authenticated, sends an appropriate message.
-    """
-    user = update.effective_user
-    if user is None:
-        return False
-        
-    # ─── Anti-Flood Check (max 2 actions per second per user) ───
+
+def is_admin(telegram_id: int) -> bool:
+    """Owners: full control of the bot."""
+    return telegram_id in ADMIN_IDS
+
+
+def is_staff(telegram_id: int) -> bool:
+    return telegram_id in STAFF_IDS
+
+
+def is_team(telegram_id: int) -> bool:
+    """Owners and staff."""
+    return telegram_id in ADMIN_IDS or telegram_id in STAFF_IDS
+
+
+def user_language(context: ContextTypes.DEFAULT_TYPE, telegram_user=None) -> str:
+    """The cached language for this chat, guessed from Telegram until the user picks one."""
+    lang = context.user_data.get("lang")
+    if lang:
+        return normalize(lang)
+    return guess_language(getattr(telegram_user, "language_code", None))
+
+
+def _throttled(user_id: int) -> bool:
     now = time.monotonic()
-    last = USER_LAST_REQUEST.get(user.id, 0)
-    if now - last < 0.5:
-        context.user_data["auth_rate_limited"] = True
-        return False
-    USER_LAST_REQUEST[user.id] = now
-    USER_LAST_REQUEST.move_to_end(user.id)
+    last = USER_LAST_REQUEST.get(user_id, 0)
+    if now - last < MIN_SECONDS_BETWEEN_ACTIONS:
+        return True
+    USER_LAST_REQUEST[user_id] = now
+    USER_LAST_REQUEST.move_to_end(user_id)
     while USER_LAST_REQUEST:
         _, oldest = next(iter(USER_LAST_REQUEST.items()))
         if now - oldest <= REQUEST_WINDOW_SECONDS:
@@ -43,41 +59,52 @@ async def require_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
         USER_LAST_REQUEST.popitem(last=False)
     while len(USER_LAST_REQUEST) > REQUEST_CACHE_MAX_USERS:
         USER_LAST_REQUEST.popitem(last=False)
+    return False
 
-    # Admins bypass PIN auth (they are identified by Telegram ID in ADMIN_IDS)
-    if user.id in ADMIN_IDS:
+
+async def _reject(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    message = update.message or (update.callback_query.message if update.callback_query else None)
+    if message:
+        context.user_data["auth_rejection_sent"] = True
+        await message.reply_text(text, parse_mode="HTML")
+
+
+async def require_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Check authentication for any update.
+    Returns True if authenticated, False otherwise (sending an explanation when useful).
+    """
+    user = update.effective_user
+    if user is None:
+        return False
+    if _throttled(user.id):
+        context.user_data["auth_rate_limited"] = True
+        return False
+
+    # The team (owners and staff) is identified by Telegram ID and skips sign-in.
+    if is_team(user.id):
+        context.user_data.setdefault("lang", "en")
         return True
 
+    lang = user_language(context, user)
     if await app_settings.is_maintenance():
-        msg = update.message or (update.callback_query.message if update.callback_query else None)
-        if msg:
-            context.user_data["auth_rejection_sent"] = True
-            await msg.reply_text(
-                "🚧 <b>MAINTENANCE MODE</b>\n\n"
-                "The bot is currently turned OFF for maintenance.\n"
-                "Please check back later! 🙏",
-                parse_mode="HTML"
-            )
+        await _reject(update, context, t(lang, "maintenance"))
         return False
 
     async with AsyncSessionLocal() as session:
         repo = UserRepository(session)
         db_user = await repo.get_or_create(user.id, user.username, user.full_name)
+        if db_user.language:
+            context.user_data["lang"] = db_user.language
+            lang = db_user.language
 
         if db_user.auth_status == AuthStatus.revoked:
-            msg = update.message or (update.callback_query.message if update.callback_query else None)
-            if msg:
-                context.user_data["auth_rejection_sent"] = True
-                await msg.reply_text("⛔  Your access has been revoked. Contact admin.")
+            await _reject(update, context, t(lang, "access_revoked"))
             return False
 
         if await repo.is_locked(db_user):
-            msg = update.message or (update.callback_query.message if update.callback_query else None)
-            if msg:
-                context.user_data["auth_rejection_sent"] = True
-                from utils.helpers import utcnow
-                remaining = int((db_user.locked_until - utcnow()).total_seconds() // 60) + 1
-                await msg.reply_text(f"🔒  Account locked. Try again in {remaining} minutes.")
+            minutes = int((db_user.locked_until - utcnow()).total_seconds() // 60) + 1
+            await _reject(update, context, t(lang, "account_locked", minutes=minutes))
             return False
 
         if await repo.is_session_valid(db_user):
@@ -88,12 +115,12 @@ async def require_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
     return False
 
 
-async def require_callback_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Acknowledge a callback immediately, then authenticate and explain failures."""
+async def require_callback_auth(update: Update, context: ContextTypes.DEFAULT_TYPE, toast: str | None = None) -> bool:
+    """Acknowledge a button press immediately (optionally with a toast), then authenticate."""
     query = update.callback_query
     if query:
         try:
-            await query.answer()
+            await query.answer(toast)
         except Exception:
             pass
 
@@ -105,13 +132,6 @@ async def require_callback_auth(update: Update, context: ContextTypes.DEFAULT_TY
     throttled = context.user_data.pop("auth_rate_limited", False)
     rejection_sent = context.user_data.pop("auth_rejection_sent", False)
     if query and query.message and not rejection_sent:
-        message = (
-            "⏳ Please wait a moment before trying that again."
-            if throttled else "🔐 Please send /start to sign in first."
-        )
-        await query.message.reply_text(message)
+        lang = user_language(context, update.effective_user)
+        await query.message.reply_text(t(lang, "slow_down" if throttled else "need_signin"))
     return False
-
-
-def is_admin(telegram_id: int) -> bool:
-    return telegram_id in ADMIN_IDS

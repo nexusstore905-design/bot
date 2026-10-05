@@ -4,10 +4,26 @@ from types import SimpleNamespace
 import pytest
 
 from bot.handlers.admin import (
-    access, customers, dashboard, limits, menu, orders, products, stores,
+    access,
+    customers,
+    dashboard,
+    limits,
+    menu,
+    orders,
+    products,
+    stores,
 )
 from conftest import (
-    ADMIN_ID, SUPPLIER_A, FakeBot, make_order, make_product, make_store, make_user, run, sql,
+    ADMIN_ID,
+    STAFF_ID,
+    SUPPLIER_A,
+    FakeBot,
+    make_order,
+    make_product,
+    make_store,
+    make_user,
+    run,
+    sql,
 )
 from services.dispatch import dispatch_order
 
@@ -61,11 +77,12 @@ class AdminQuery:
 
 
 ADMIN = SimpleNamespace(id=ADMIN_ID, full_name="Admin <One>", username="boss")
+STAFF = SimpleNamespace(id=STAFF_ID, full_name="Staff Sara", username="sara")
 
 
-def press(handler, data, bot, user_data=None):
+def press(handler, data, bot, user_data=None, user=ADMIN):
     update = SimpleNamespace(
-        callback_query=AdminQuery(data), message=None, effective_user=ADMIN,
+        callback_query=AdminQuery(data), message=None, effective_user=user,
         effective_chat=SimpleNamespace(id=ADMIN_ID), effective_message=None,
     )
     context = SimpleNamespace(bot=bot, user_data=user_data if user_data is not None else {})
@@ -86,7 +103,7 @@ def send(handler, text, bot, user_data):
 @pytest.fixture
 def world():
     user = run(make_user(111))
-    product = run(make_product(price=1.5))
+    product = run(make_product())
     store, _ = run(make_store("Shop <&>"))
     order = run(make_order(user, [(SUPPLIER_A, "UC <b>")], player_id="p<1>"))
     bot = AdminBot()
@@ -113,7 +130,6 @@ def test_admin_screens_render(world):
         (products.cb_admin_products, "adm_products"),
         (products.cb_admin_product_advanced, "adm_product_advanced"),
         (products.cb_list_products, "adm_list_products"),
-        (products.cb_set_price_start, "adm_set_price"),
         (products.cb_set_supplier_start, "adm_set_supplier"),
         (products.cb_edit_name_start, "adm_edit_name"),
         (access.cb_admin_pin, "adm_pin"),
@@ -161,15 +177,7 @@ def test_admin_order_actions(world):
 def test_admin_settings_and_store_management(world):
     bot = world.bot
     press(menu.cb_toggle_power, "adm_toggle_power", bot)
-    press(menu.cb_toggle_prices, "adm_toggle_prices", bot)
-    assert dict(sql("SELECT key, value FROM app_settings WHERE key IN ('maintenance', 'show_prices')")) == {
-        "maintenance": "on", "show_prices": "on",
-    }
-
-    data = {}
-    press(products.cb_set_price_start, "adm_set_price", bot, data)
-    send(products.admin_set_price_value, f"#{world.product.id} | 2,50", bot, data)
-    assert sql("SELECT price FROM products") == [(2.5,)]
+    assert sql("SELECT value FROM app_settings WHERE key = 'maintenance'") == [("on",)]
 
     old_hash = sql("SELECT api_key_hash FROM api_stores")[0][0]
     rotated = press(stores.cb_store_rotate_confirm, f"store_rotate_ok:{world.store.id}", bot)[0]
@@ -219,3 +227,32 @@ def test_non_admins_are_rejected(world):
     update = SimpleNamespace(callback_query=query, effective_user=outsider, effective_message=None)
     run(dashboard.cb_admin_stats(update, SimpleNamespace(bot=world.bot, user_data={})))
     assert alerts == ["⛔ Admins only."] and query.message.outputs == []
+
+
+def test_staff_can_handle_orders_but_not_owner_tools(world):
+    bot = world.bot
+    menu_text = press(menu.cb_admin_menu, "admin_menu", bot, user=STAFF)[0]
+    assert "Team panel" in menu_text
+    assert press(dashboard.cb_admin_stats, "adm_stats", bot, user=STAFF)
+    assert press(orders.cb_orders_by_status, "adm_orders_pending", bot, user=STAFF)
+    assert press(customers.cb_customer_details, "adm_customer:111", bot, user=STAFF)
+
+    press(orders.cb_set_status, f"set_status:{world.order.order_id}:cancelled", bot, user=STAFF)
+    assert sql("SELECT status FROM orders") == [("cancelled",)]
+
+    for handler, data in [
+        (stores.cb_list_stores, "adm_list_stores"),
+        (menu.cb_admin_advanced, "adm_advanced"),
+        (customers.cb_customer_settle_start, "adm_customer_settle:111"),
+        (dashboard.cb_export_orders, "adm_export_orders"),
+    ]:
+        query = AdminQuery(data)
+        alerts = []
+
+        async def answer(text=None, show_alert=False, alerts=alerts):
+            alerts.append(text)
+
+        query.answer = answer
+        update = SimpleNamespace(callback_query=query, effective_user=STAFF, effective_message=None)
+        run(handler(update, SimpleNamespace(bot=bot, user_data={})))
+        assert alerts == ["⛔ Owners only."], handler.__name__

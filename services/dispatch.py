@@ -13,7 +13,7 @@ from bot.keyboards.admin_kb import supplier_done_error_kb
 from database.database import AsyncSessionLocal
 from database.repositories.order_repo import MAX_DISPATCH_ATTEMPTS, OrderRepository
 from services.messages import supplier_order_text
-from services.notify import announce_order_status, notify_admins
+from services.notify import announce_order_status, notify_team
 from utils.helpers import utcnow
 from utils.ui import esc
 
@@ -64,7 +64,7 @@ async def dispatch_fulfillment(bot, fulfillment_id: int) -> DispatchOutcome:
         )
         if not final:
             return DispatchOutcome(fulfillment_id, RETRY, category, error)
-        await notify_admins(
+        await notify_team(
             bot,
             "⚠️ <b>SUPPLIER DELIVERY FAILED</b>\n\n"
             f"Order: <code>{esc(order_id)}</code>\n"

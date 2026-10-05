@@ -3,20 +3,26 @@ from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 from bot.handlers.admin.common import (
-    STATUS_ICONS, admin_label, admin_only, local_datetime, parse_chat_id_or_forward,
+    STATUS_ICONS,
+    admin_label,
+    local_datetime,
+    parse_chat_id_or_forward,
+    team_only,
 )
 from bot.keyboards.admin_kb import admin_order_actions_kb, admin_orders_kb, cancel_conv_kb
 from bot.states.states import ADMIN_REASSIGN_ORDER, ADMIN_SEARCH_ORDER
 from database.database import AsyncSessionLocal
 from database.models import (
-    ApiStore, OrderStatus, SupplierFulfillmentStatus, OPEN_ORDER_STATUSES,
+    OPEN_ORDER_STATUSES,
+    ApiStore,
+    OrderStatus,
+    SupplierFulfillmentStatus,
 )
 from database.repositories.order_repo import OrderRepository
 from services.audit import audit
 from services.dispatch import FAILED, RETRY, SENT, dispatch_order
-from services.messages import order_total
 from services.notify import announce_order_status, close_supplier_message
-from utils.ui import esc, money
+from utils.ui import esc
 
 PART_ICONS = {
     SupplierFulfillmentStatus.queued: "🕓",
@@ -27,7 +33,7 @@ PART_ICONS = {
 }
 
 
-@admin_only
+@team_only
 async def cb_admin_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.message.edit_text(
@@ -35,7 +41,7 @@ async def cb_admin_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-@admin_only
+@team_only
 async def cb_orders_by_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     status = OrderStatus(update.callback_query.data.removeprefix("adm_orders_"))
@@ -74,12 +80,7 @@ async def _order_view(order_id: str) -> tuple[str, object] | None:
     source = "Telegram bot" if order.api_store_id is None else (
         f"API store <b>{esc(store.name)}</b>" if store else f"Deleted API store #{order.api_store_id}"
     )
-    items = "\n".join(
-        f"• {esc(item.product_name)} × {item.quantity}"
-        + (f" — {money(item.unit_price * item.quantity)}" if item.unit_price is not None else "")
-        for item in order.items
-    ) or "• —"
-    total = order_total(order.items)
+    items = "\n".join(f"• {esc(item.product_name)} × {item.quantity}" for item in order.items) or "• —"
     lines = [
         f"📦 <b>ORDER {esc(order.order_id)}</b>",
         "──────────────",
@@ -92,8 +93,6 @@ async def _order_view(order_id: str) -> tuple[str, object] | None:
     if order.settled_at:
         lines.append(f"Payment cleared: {local_datetime(order.settled_at)}")
     lines += ["", "<b>Items</b>", items]
-    if total is not None:
-        lines.append(f"Total: <b>{money(total)}</b>")
     if order.fulfillments:
         lines += ["", "<b>Supplier parts</b>"]
         for part in order.fulfillments:
@@ -125,7 +124,7 @@ async def _order_view(order_id: str) -> tuple[str, object] | None:
     return "\n".join(lines), admin_order_actions_kb(order.order_id, is_open, can_resend)
 
 
-@admin_only
+@team_only
 async def cb_search_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.message.edit_text(
@@ -136,7 +135,7 @@ async def cb_search_order_start(update: Update, context: ContextTypes.DEFAULT_TY
     return ADMIN_SEARCH_ORDER
 
 
-@admin_only
+@team_only
 async def admin_search_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_id = update.message.text.strip().upper()
     view = await _order_view(order_id)
@@ -150,7 +149,7 @@ async def admin_search_order(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 
-@admin_only
+@team_only
 async def cb_set_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     _, order_id, new_status_str = query.data.split(":", 2)
@@ -225,7 +224,7 @@ async def _resend(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: 
     )
 
 
-@admin_only
+@team_only
 async def cb_resend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("Re-sending…")
@@ -238,7 +237,7 @@ async def cb_resend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(result, parse_mode="HTML")
 
 
-@admin_only
+@team_only
 async def cb_reassign_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     order_id = update.callback_query.data.split(":", 1)[1]
@@ -253,7 +252,7 @@ async def cb_reassign_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ADMIN_REASSIGN_ORDER
 
 
-@admin_only
+@team_only
 async def admin_reassign_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_id = context.user_data.get("reassign_order_id")
     if not order_id:

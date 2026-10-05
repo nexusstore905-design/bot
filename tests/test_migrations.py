@@ -50,6 +50,7 @@ def test_legacy_database_upgrades_in_place(tmp_path):
         hash_api_key("nxs_plaintextkey123"), "nxs_plaintex",
     )
     assert {"idempotency_key"} <= set(columns(conn, "orders"))
+    assert "language" in columns(conn, "users")
     assert conn.execute("SELECT dispatched_at FROM supplier_fulfillments").fetchone()[0] is not None
     for table in ("saved_player_ids", "webhook_events", "admin_audit_log", "support_messages", "api_store_customers"):
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (table,)).fetchone()

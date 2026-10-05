@@ -2,14 +2,21 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from sqlalchemy import select, func, desc, update, distinct, or_, and_
+from sqlalchemy import and_, desc, distinct, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from database.models import (
-    ApiStore, Order, OrderItem, OrderStatusHistory, OrderStatus, Product,
-    SupplierFulfillment, SupplierFulfillmentStatus, WebhookEvent,
     OPEN_ORDER_STATUSES,
+    ApiStore,
+    Order,
+    OrderItem,
+    OrderStatus,
+    OrderStatusHistory,
+    Product,
+    SupplierFulfillment,
+    SupplierFulfillmentStatus,
+    WebhookEvent,
 )
 from utils.helpers import as_utc, generate_order_id, utcnow
 from utils.supplier_routing import resolve_supplier_chat
@@ -71,7 +78,7 @@ class OrderRepository:
     ) -> Order:
         """Create an order with its items and supplier parts in one transaction.
 
-        Each item is {"product_id", "product_name", "quantity", "unit_price"?}.
+        Each item is {"product_id", "product_name", "quantity"}.
         Each fulfillment is {"supplier_chat_id", "category", "items": [...]}.
         """
         order = Order(
@@ -91,7 +98,6 @@ class OrderRepository:
                 product_id=item["product_id"],
                 product_name=item["product_name"],
                 quantity=item["quantity"],
-                unit_price=item.get("unit_price"),
             ))
         self.session.add(OrderStatusHistory(
             order_id=order.id,
@@ -644,34 +650,24 @@ class OrderRepository:
         result = await self.session.execute(statement)
         return result.scalar_one() or 0
 
-    async def unsettled_balance_by_user(self, user_id: int) -> dict:
-        """Completed, unpaid orders: count, priced total, and lines without a price."""
-        result = await self.session.execute(
-            select(OrderItem.unit_price, OrderItem.quantity, Order.id)
-            .join(Order, Order.id == OrderItem.order_id)
-            .where(
-                Order.user_id == user_id,
-                Order.settled_at.is_(None),
-                Order.status == OrderStatus.completed,
-            )
+    async def customer_summary(self, user_id: int) -> dict:
+        """Home-screen numbers: open orders, completed orders awaiting payment, latest order."""
+        active = await self.session.scalar(
+            select(func.count()).select_from(Order)
+            .where(Order.user_id == user_id, Order.status.in_(OPEN_ORDER_STATUSES))
         )
-        total = 0.0
-        unpriced = 0
-        orders: set[int] = set()
-        for unit_price, quantity, order_pk in result.all():
-            orders.add(order_pk)
-            if unit_price is None:
-                unpriced += 1
-            else:
-                total += unit_price * quantity
+        due = await self.count_unsettled_by_user(user_id)
         last_settled = await self.session.scalar(
             select(func.max(Order.settled_at)).where(Order.user_id == user_id)
         )
+        latest = await self.session.execute(
+            select(Order).where(Order.user_id == user_id).order_by(desc(Order.created_at)).limit(1)
+        )
         return {
-            "orders": len(orders),
-            "total": round(total, 2),
-            "unpriced_lines": unpriced,
+            "active": int(active or 0),
+            "due": int(due or 0),
             "last_settled_at": as_utc(last_settled),
+            "latest": latest.scalars().first(),
         }
 
     async def get_unsettled_high_watermark_by_user(self, user_id: int) -> int:

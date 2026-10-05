@@ -2,7 +2,13 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-def admin_main_kb() -> InlineKeyboardMarkup:
+def admin_main_kb(is_owner: bool = True) -> InlineKeyboardMarkup:
+    if not is_owner:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("📦  Orders", callback_data="adm_orders"),
+             InlineKeyboardButton("📊  Dashboard", callback_data="adm_stats")],
+            [InlineKeyboardButton("👥  Customers", callback_data="adm_users")],
+        ])
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📦  Orders", callback_data="adm_orders"),
          InlineKeyboardButton("📊  Dashboard", callback_data="adm_stats")],
@@ -16,7 +22,7 @@ def admin_main_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def admin_advanced_kb(is_on: bool = True, prices_on: bool = False) -> InlineKeyboardMarkup:
+def admin_advanced_kb(is_on: bool = True) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏪  API stores", callback_data="adm_api_stores"),
          InlineKeyboardButton("🚦  Order limits", callback_data="adm_user_limits")],
@@ -24,23 +30,19 @@ def admin_advanced_kb(is_on: bool = True, prices_on: bool = False) -> InlineKeyb
             "🟢  Service is on" if is_on else "🔴  Maintenance mode",
             callback_data="adm_toggle_power",
         )],
-        [InlineKeyboardButton(
-            "💲  Prices shown to customers" if prices_on else "🙈  Prices hidden from customers",
-            callback_data="adm_toggle_prices",
-        )],
         [InlineKeyboardButton("🧾  Admin activity log", callback_data="adm_audit")],
         [InlineKeyboardButton("🧨  Reset customers, orders & keys", callback_data="adm_reset_business_data")],
         [InlineKeyboardButton("◀  Admin menu", callback_data="admin_menu")],
     ])
 
 
-def admin_dashboard_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄  Refresh", callback_data="adm_stats"),
-         InlineKeyboardButton("🤝  Supplier stats", callback_data="adm_supplier_stats")],
-        [InlineKeyboardButton("📤  Export all orders (CSV)", callback_data="adm_export_orders")],
-        [InlineKeyboardButton("◀  Admin menu", callback_data="admin_menu")],
-    ])
+def admin_dashboard_kb(is_owner: bool = True) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("🔄  Refresh", callback_data="adm_stats"),
+             InlineKeyboardButton("🤝  Supplier stats", callback_data="adm_supplier_stats")]]
+    if is_owner:
+        rows.append([InlineKeyboardButton("📤  Export all orders (CSV)", callback_data="adm_export_orders")])
+    rows.append([InlineKeyboardButton("◀  Admin menu", callback_data="admin_menu")])
+    return InlineKeyboardMarkup(rows)
 
 
 def admin_orders_kb() -> InlineKeyboardMarkup:
@@ -58,8 +60,7 @@ def admin_orders_kb() -> InlineKeyboardMarkup:
 def admin_products_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕  Add group & packages", callback_data="adm_add_product")],
-        [InlineKeyboardButton("📡  Supplier routing", callback_data="adm_set_supplier"),
-         InlineKeyboardButton("💲  Prices", callback_data="adm_set_price")],
+        [InlineKeyboardButton("📡  Supplier routing", callback_data="adm_set_supplier")],
         [InlineKeyboardButton("✏️  Edit product", callback_data="adm_edit_name"),
          InlineKeyboardButton("🗑  Remove",        callback_data="adm_remove_product")],
         [InlineKeyboardButton("📝  Rename product group", callback_data="adm_rename_group")],
@@ -118,18 +119,20 @@ def admin_customers_kb(customers: list, page: int, total: int, page_size: int = 
     return InlineKeyboardMarkup(rows)
 
 
-def admin_customer_detail_kb(telegram_id: int, unsettled_count: int = 0) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            f"💰  Unsettled orders ({unsettled_count})",
-            callback_data=f"adm_customer_unsettled:{telegram_id}:0",
-        )],
-        [InlineKeyboardButton("✅  Clear paid orders", callback_data=f"adm_customer_settle:{telegram_id}")],
-        [InlineKeyboardButton("🧾  Order history", callback_data=f"adm_customer_orders:{telegram_id}:0"),
-         InlineKeyboardButton("📤  Export CSV", callback_data=f"adm_customer_export:{telegram_id}")],
-        [InlineKeyboardButton("📅  Count by date", callback_data=f"adm_customer_dates:{telegram_id}")],
-        [InlineKeyboardButton("◀  Customers", callback_data="adm_users")],
-    ])
+def admin_customer_detail_kb(telegram_id: int, unsettled_count: int = 0, is_owner: bool = True) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(
+        f"💰  Unsettled orders ({unsettled_count})",
+        callback_data=f"adm_customer_unsettled:{telegram_id}:0",
+    )]]
+    if is_owner:
+        rows.append([InlineKeyboardButton("✅  Clear paid orders", callback_data=f"adm_customer_settle:{telegram_id}")])
+    history = [InlineKeyboardButton("🧾  Order history", callback_data=f"adm_customer_orders:{telegram_id}:0")]
+    if is_owner:
+        history.append(InlineKeyboardButton("📤  Export CSV", callback_data=f"adm_customer_export:{telegram_id}"))
+    rows.append(history)
+    rows.append([InlineKeyboardButton("📅  Count by date", callback_data=f"adm_customer_dates:{telegram_id}")])
+    rows.append([InlineKeyboardButton("◀  Customers", callback_data="adm_users")])
+    return InlineKeyboardMarkup(rows)
 
 
 def admin_customer_unsettled_kb(

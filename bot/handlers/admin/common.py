@@ -8,7 +8,7 @@ from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 from bot.keyboards.admin_kb import admin_advanced_kb
-from bot.middlewares.auth_middleware import is_admin
+from bot.middlewares.auth_middleware import is_admin, is_team
 from services import app_settings
 
 logger = logging.getLogger("bot.handlers.admin")
@@ -17,19 +17,25 @@ STATUS_ICONS = {"pending": "⏳", "processing": "⚙️", "completed": "✅", "f
 PAKISTAN_TZ = ZoneInfo("Asia/Karachi")
 
 
-def admin_only(func):
-    """Reject non-admins on any admin handler, including conversation steps."""
-    @functools.wraps(func)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        if user is None or not is_admin(user.id):
-            if update.callback_query:
-                await update.callback_query.answer("⛔ Admins only.", show_alert=True)
-            elif update.effective_message:
-                await update.effective_message.reply_text("⛔ Admin only command.")
-            return ConversationHandler.END
-        return await func(update, context)
-    return wrapper
+def _guard(allowed, denial: str):
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            user = update.effective_user
+            if user is None or not allowed(user.id):
+                if update.callback_query:
+                    await update.callback_query.answer(denial, show_alert=True)
+                elif update.effective_message:
+                    await update.effective_message.reply_text(denial)
+                return ConversationHandler.END
+            return await func(update, context)
+        return wrapper
+    return decorator
+
+
+# Owners: everything. Staff: orders, customers (read-only payments), dashboard.
+admin_only = _guard(is_admin, "⛔ Owners only.")
+team_only = _guard(is_team, "⛔ Admins only.")
 
 
 def local_datetime(value: datetime | None) -> str:
@@ -45,10 +51,7 @@ def admin_label(user) -> str:
 
 
 async def advanced_kb():
-    return admin_advanced_kb(
-        is_on=not await app_settings.is_maintenance(),
-        prices_on=await app_settings.show_prices(),
-    )
+    return admin_advanced_kb(is_on=not await app_settings.is_maintenance())
 
 
 def parse_chat_id_or_forward(message) -> tuple[int | None, str | None]:

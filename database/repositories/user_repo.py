@@ -1,13 +1,12 @@
-from datetime import datetime, timezone, timedelta
-from typing import Optional, List
 import secrets
 import string
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import Order, User, AccessCode, AuthStatus
-from config.settings import MAX_PIN_ATTEMPTS, LOCKOUT_MINUTES, SESSION_HOURS
+from config.settings import LOCKOUT_MINUTES, MAX_PIN_ATTEMPTS, SESSION_HOURS
+from database.models import AccessCode, AuthStatus, Order, User
 
 
 def _utcnow() -> datetime:
@@ -25,7 +24,7 @@ class UserRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def get_or_create(self, telegram_id: int, username: Optional[str], full_name: Optional[str]) -> User:
+    async def get_or_create(self, telegram_id: int, username: str | None, full_name: str | None) -> User:
         result = await self.session.execute(select(User).where(User.telegram_id == telegram_id))
         user = result.scalar_one_or_none()
         if user is None:
@@ -45,11 +44,11 @@ class UserRepository:
                 await self.session.commit()
         return user
 
-    async def get_by_telegram_id(self, telegram_id: int) -> Optional[User]:
+    async def get_by_telegram_id(self, telegram_id: int) -> User | None:
         result = await self.session.execute(select(User).where(User.telegram_id == telegram_id))
         return result.scalar_one_or_none()
 
-    async def get_all(self) -> List[User]:
+    async def get_all(self) -> list[User]:
         result = await self.session.execute(select(User).order_by(User.created_at.desc()))
         return list(result.scalars().all())
 
@@ -101,71 +100,55 @@ class UserRepository:
                 return False
         return True
 
-    async def try_register_with_code(self, user: User, code_input: str) -> tuple:
+    async def try_register_with_code(self, user: User, code_input: str) -> tuple[bool, str, dict]:
         """
-        Try to register/authenticate using an admin-created access code.
-        Returns (success: bool, message: str)
+        Try to sign in with an admin-created access code.
+        Returns (success, i18n key, params) so callers can show it in the user's language.
         """
         if user.auth_status == AuthStatus.revoked:
-            return False, "Your access has been revoked. Contact admin."
+            return False, "access_revoked", {}
 
         if await self.is_locked(user):
-            remaining = int((user.locked_until - _utcnow()).total_seconds() // 60) + 1
-            return False, f"Too many failed attempts. Try again in {remaining} minutes."
-
-        # If already authenticated with a code, they don't need to re-enter
-        # (this path is for first-time or logged-out users)
+            minutes = int((user.locked_until - _utcnow()).total_seconds() // 60) + 1
+            return False, "code_locked", {"minutes": minutes}
 
         code_input = code_input.strip().upper()
-
-        # Look up the code
         result = await self.session.execute(
             select(AccessCode).where(AccessCode.code == code_input)
         )
         access_code = result.scalar_one_or_none()
-
-        if access_code is None or not access_code.is_active:
-            # Invalid code — record failed attempt (brute-force protection)
+        usable = (
+            access_code is not None and access_code.is_active
+            and access_code.used_by in (None, user.telegram_id)
+        )
+        if not usable:
+            # Wrong, revoked, or someone else's code: count it (brute-force protection).
             user.failed_attempts += 1
             if user.failed_attempts >= MAX_PIN_ATTEMPTS:
                 user.locked_until = _utcnow() + timedelta(minutes=LOCKOUT_MINUTES)
                 user.failed_attempts = 0
                 await self.session.commit()
-                return False, f"Too many failed attempts. Account locked for {LOCKOUT_MINUTES} minutes."
-            remaining = MAX_PIN_ATTEMPTS - user.failed_attempts
+                return False, "code_locked", {"minutes": LOCKOUT_MINUTES}
             await self.session.commit()
-            return False, f"Invalid access code. {remaining} attempt(s) remaining."
+            return False, "code_invalid", {"remaining": MAX_PIN_ATTEMPTS - user.failed_attempts}
 
-        # Code exists — check if already used by another user
-        if access_code.used_by is not None and access_code.used_by != user.telegram_id:
-            user.failed_attempts += 1
-            if user.failed_attempts >= MAX_PIN_ATTEMPTS:
-                user.locked_until = _utcnow() + timedelta(minutes=LOCKOUT_MINUTES)
-                user.failed_attempts = 0
-                await self.session.commit()
-                return False, f"Too many failed attempts. Account locked for {LOCKOUT_MINUTES} minutes."
-            remaining = MAX_PIN_ATTEMPTS - user.failed_attempts
-            await self.session.commit()
-            return False, f"Invalid access code. {remaining} attempt(s) remaining."
-
-        # Success — register the code to this user if first time
         if access_code.used_by is None:
             access_code.used_by = user.telegram_id
             access_code.used_at = _utcnow()
 
-        # Authenticate the user
         user.auth_status = AuthStatus.authenticated
         user.failed_attempts = 0
         user.locked_until = None
         user.last_login = _utcnow()
-        if SESSION_HOURS > 0:
-            user.session_expires = _utcnow() + timedelta(hours=SESSION_HOURS)
-        else:
-            user.session_expires = None
-
+        user.session_expires = (
+            _utcnow() + timedelta(hours=SESSION_HOURS) if SESSION_HOURS > 0 else None
+        )
         await self.session.commit()
-        label = f" ({access_code.label})" if access_code.label else ""
-        return True, f"Welcome! Access granted{label}."
+        return True, "signin_ok", {}
+
+    async def set_language(self, user: User, language: str) -> None:
+        user.language = language
+        await self.session.commit()
 
     async def logout(self, user: User) -> None:
         user.auth_status = AuthStatus.unauthenticated
@@ -197,7 +180,7 @@ class AccessCodeRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def create(self, label: Optional[str] = None, custom_code: Optional[str] = None) -> AccessCode:
+    async def create(self, label: str | None = None, custom_code: str | None = None) -> AccessCode:
         """Create a new access code. Auto-generates if no custom code given."""
         for _ in range(10):
             code = custom_code.strip().upper() if custom_code else generate_access_code(8)
@@ -211,14 +194,14 @@ class AccessCodeRepository:
         await self.session.refresh(ac)
         return ac
 
-    async def get_all(self) -> List[AccessCode]:
+    async def get_all(self) -> list[AccessCode]:
         result = await self.session.execute(select(AccessCode).order_by(AccessCode.created_at.desc()))
         return list(result.scalars().all())
 
-    async def get_active_unused(self) -> List[AccessCode]:
+    async def get_active_unused(self) -> list[AccessCode]:
         result = await self.session.execute(
             select(AccessCode)
-            .where(AccessCode.is_active == True, AccessCode.used_by == None)
+            .where(AccessCode.is_active.is_(True), AccessCode.used_by.is_(None))
             .order_by(AccessCode.created_at.desc())
         )
         return list(result.scalars().all())

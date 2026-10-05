@@ -8,7 +8,9 @@ The store sends an order to the bot API. The API checks the API key, the Telegra
 
 Each product uses its own supplier route. A global supplier chat is used as a fallback when a product has no individual supplier configured.
 
-One request creates one unit of one product. Payment collection remains the store's responsibility.
+One request creates one unit of one product. The API never handles prices or payment — those stay with your store.
+
+All endpoints live under `/v1/`. The unversioned paths (`/orders/`, `/products/`) still work as aliases, but new integrations should use `/v1/`.
 
 ## 2. Before connecting
 
@@ -17,7 +19,7 @@ You will need:
 1. The Telegram bot running as an always-on task, and the API web app, both using the **same database**.
 2. An active API store and its API key.
 3. Each customer's numeric Telegram user ID. The customer must have opened the bot and **signed in with an access code** at least once.
-4. The bot's product ID for each item you sell (`GET /products/` lists them).
+4. The bot's product ID for each item you sell (`GET /v1/products/` lists them).
 
 ### Create an API store and key
 
@@ -50,8 +52,8 @@ BOT_TOKEN=<the bot token>
 DATABASE_URL=<optional; defaults to nexus_bot.db in the project folder>
 API_KEY=
 API_CORS_ORIGINS=
-CURRENCY=USDT
 SUPPLIER_TIMEOUT_MINUTES=10
+API_RATE_LIMIT_PER_MINUTE=60
 ```
 
 ### Health check
@@ -76,24 +78,22 @@ Never put the key in a URL, browser JavaScript, or a mobile app. Browser storefr
 ## 5. List products
 
 ```http
-GET /products/
+GET /v1/products/
 X-API-Key: YOUR_STORE_API_KEY
 ```
 
 ```json
 {
   "products": [
-    {"product_id": 3, "category": "PUBG UC Top Up", "name": "660 UC", "price": 9.99, "currency": "USDT"}
+    {"product_id": 3, "category": "PUBG UC Top Up", "name": "660 UC"}
   ]
 }
 ```
 
-`price` is `null` unless the admin has enabled price display and set a price for that product.
-
 ## 6. Create an order
 
 ```http
-POST /orders/
+POST /v1/orders/
 Content-Type: application/json
 X-API-Key: YOUR_STORE_API_KEY
 Idempotency-Key: your-checkout-id-123
@@ -112,7 +112,7 @@ Send a unique `Idempotency-Key` header (1–64 printable ASCII characters, e.g. 
 ### Example
 
 ```bash
-curl -X POST "https://YOUR_API_HOST/orders/" \
+curl -X POST "https://YOUR_API_HOST/v1/orders/" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $NEXUS_STORE_API_KEY" \
   -H "Idempotency-Key: checkout-123" \
@@ -123,7 +123,7 @@ curl -X POST "https://YOUR_API_HOST/orders/" \
 
 ```js
 async function createBotOrder({ checkoutId, telegramUserId, productId, playerId }) {
-  const response = await fetch(`${process.env.NEXUS_API_BASE_URL}/orders/`, {
+  const response = await fetch(`${process.env.NEXUS_API_BASE_URL}/v1/orders/`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -153,8 +153,6 @@ async function createBotOrder({ checkoutId, telegramUserId, productId, playerId 
   "product_id": 3,
   "product_name": "660 UC",
   "quantity": 1,
-  "unit_price": 9.99,
-  "currency": "USDT",
   "player_id": "5123456789",
   "created_at": "2026-10-06T10:15:00+00:00",
   "updated_at": "2026-10-06T10:15:00+00:00",
@@ -172,7 +170,6 @@ async function createBotOrder({ checkoutId, telegramUserId, productId, playerId 
 | `retrying` | Telegram delivery failed; the bot retries automatically (about 20 s and 60 s later). Do **not** resubmit. |
 | `failed` | Delivery failed after all retries; the order becomes `failed` and admins are alerted. |
 
-`unit_price` is the product price at order time, or `null` if none was set.
 
 ## 7. Webhooks (recommended)
 
@@ -214,7 +211,7 @@ Respond with any `2xx` status quickly. Failed deliveries are retried with expone
 ## 8. Check order status
 
 ```http
-GET /orders/{order_id}
+GET /v1/orders/{order_id}
 X-API-Key: YOUR_STORE_API_KEY
 ```
 
@@ -241,11 +238,12 @@ Errors use `{"detail": "..."}`. Unexpected server errors return `500` with `{"de
 | `403` | Store disabled; customer revoked or never signed in; store not allowed to order for this customer. | Ask the bot admin. |
 | `404` | Order not found for this key. | Check the ID and key. |
 | `409` | `Idempotency-Key` reused for a different order. | Use a new key for a new order. |
-| `429` | Store or customer daily limit reached (UTC days). | Wait for the reset or ask the admin. |
+| `429` | Rate limit (per minute) or a store/customer daily limit (UTC days) reached. | Honour the `Retry-After` header for rate limits; for daily limits wait for the reset or ask the admin. |
 | `503` | No supplier configured for the product, or database unavailable. | Ask the admin to configure routing. |
 
-## 10. Quotas
+## 10. Quotas and rate limits
 
+- Each API key may make `API_RATE_LIMIT_PER_MINUTE` requests per minute (default 60); each client IP gets five times that. Over the limit you get `429` with a `Retry-After` header (seconds).
 - Each store has its own daily limit (`0` = unlimited). Each customer can also have one (no limit = unlimited, `0` = blocked).
 - Counters reset at UTC midnight and are reserved when an order is accepted.
 - The master key bypasses store quotas and scoping; customer limits still apply.
@@ -260,6 +258,6 @@ Server-to-server integrations need no CORS. For direct browser calls, set `API_C
 |---|---|---|---|
 | `GET` | `/` | None | Service info |
 | `GET` | `/health` | None | Database and bot status |
-| `GET` | `/products/` | `X-API-Key` | Active products |
-| `POST` | `/orders/` | `X-API-Key` | Create one order (send `Idempotency-Key`) |
-| `GET` | `/orders/{order_id}` | `X-API-Key` | Order status and details |
+| `GET` | `/v1/products/` | `X-API-Key` | Active products |
+| `POST` | `/v1/orders/` | `X-API-Key` | Create one order (send `Idempotency-Key`) |
+| `GET` | `/v1/orders/{order_id}` | `X-API-Key` | Order status and details |

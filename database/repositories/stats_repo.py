@@ -6,8 +6,14 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import (
-    AdminAuditLog, ApiStore, AuthStatus, Order, OrderStatus,
-    SupplierFulfillment, SupplierFulfillmentStatus, User,
+    AdminAuditLog,
+    ApiStore,
+    AuthStatus,
+    Order,
+    OrderStatus,
+    SupplierFulfillment,
+    SupplierFulfillmentStatus,
+    User,
 )
 from utils.helpers import as_utc
 
