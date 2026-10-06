@@ -13,8 +13,8 @@ from bot.keyboards.admin_kb import supplier_done_error_kb
 from config.settings import SUPPLIER_TIMEOUT_MINUTES
 from database.database import AsyncSessionLocal
 from database.repositories.order_repo import MAX_DISPATCH_ATTEMPTS, OrderRepository
-from services.messages import supplier_order_text
-from services.notify import announce_order_status, notify_team
+from services.messages import supplier_notice, supplier_order_text
+from services.notify import announce_order_status, close_supplier_message, notify_team
 from utils.helpers import utcnow
 from utils.ui import esc
 
@@ -83,7 +83,18 @@ async def dispatch_fulfillment(bot, fulfillment_id: int) -> DispatchOutcome:
         return DispatchOutcome(fulfillment_id, FAILED, category, error)
 
     async with AsyncSessionLocal() as session:
-        await OrderRepository(session).mark_dispatched(fulfillment_id, message.message_id, utcnow())
+        recorded = await OrderRepository(session).mark_dispatched(fulfillment_id, message.message_id, utcnow())
+    if not recorded:
+        # The part was closed while we were sending; never leave live buttons behind.
+        await close_supplier_message(
+            bot, chat_id, message.message_id,
+            supplier_notice(
+                "🛑", "CLOSED", order_id,
+                "This order was closed before delivery finished.\n🚫 <b>Do not process this order.</b>",
+            ),
+        )
+        logger.info("Order %s part %s was closed during delivery; supplier card withdrawn", order_id, fulfillment_id)
+        return DispatchOutcome(fulfillment_id, SKIPPED, category)
     logger.info("Delivered order %s group %s to supplier chat %s", order_id, category, chat_id)
     return DispatchOutcome(fulfillment_id, SENT, category)
 

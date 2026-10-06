@@ -183,6 +183,17 @@ def _order_payload(order) -> dict:
     }
 
 
+def _as_int(value) -> int | None:
+    """An integer, or a string of digits. Booleans and floats are rejected."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
 def _valid_player_id(value: str) -> bool:
     return 3 <= len(value) <= 20 and value.isprintable() and not any(ch.isspace() for ch in value)
 
@@ -264,11 +275,9 @@ def create_order():
         raise ApiError(400, "telegram_user_id, product_id, and player_id are required")
     if not _valid_player_id(player_id):
         raise ApiError(400, "Invalid player_id. Must be 3-20 characters with no spaces")
-    try:
-        telegram_user_id = int(telegram_user_id)
-        product_id = int(product_id)
-    except (TypeError, ValueError):
-        raise ApiError(400, "telegram_user_id and product_id must be integers") from None
+    telegram_user_id, product_id = _as_int(telegram_user_id), _as_int(product_id)
+    if telegram_user_id is None or product_id is None or telegram_user_id <= 0 or product_id <= 0:
+        raise ApiError(400, "telegram_user_id and product_id must be positive integers")
     idempotency_key = request.headers.get("Idempotency-Key", "").strip() or None
     if idempotency_key and (
         len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LENGTH

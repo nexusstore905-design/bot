@@ -153,7 +153,16 @@ async def cb_category_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_select_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_callback_auth(update, context):
         return ConversationHandler.END
-    context.user_data["temp_cat"] = update.callback_query.data.split(":", 1)[1]
+    prefix, value = update.callback_query.data.split(":", 1)
+    if prefix == "cat_i":
+        # Long category names are sent by position; resolve against the current list.
+        async with AsyncSessionLocal() as session:
+            categories = await ProductRepository(session).get_categories()
+        index = int(value)
+        if not 0 <= index < len(categories):
+            return await _show_categories(update, context)
+        value = categories[index]
+    context.user_data["temp_cat"] = value
     context.user_data.pop("search_query", None)
     return await _show_products(update, context)
 
@@ -731,7 +740,7 @@ def get_order_conversation() -> ConversationHandler:
         ],
         states={
             ORDER_SELECT_CATEGORY: [
-                CallbackQueryHandler(cb_select_category, pattern=r"^cat:"),
+                CallbackQueryHandler(cb_select_category, pattern=r"^(cat:|cat_i:\d+$)"),
                 CallbackQueryHandler(cb_category_page, pattern=r"^cat_page:\d+$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, msg_search),
                 *browse,

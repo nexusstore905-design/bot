@@ -5,6 +5,13 @@ from telegram import InlineKeyboardMarkup
 from bot.i18n import LANGUAGES, t
 
 CATALOG_PAGE_SIZE = 10
+CALLBACK_DATA_MAX_BYTES = 64  # Telegram rejects the whole keyboard above this
+
+
+def category_callback(category: str, index: int) -> str:
+    """`cat:<name>` when it fits, otherwise `cat_i:<position in the category list>`."""
+    data = f"cat:{category}"
+    return data if len(data.encode("utf-8")) <= CALLBACK_DATA_MAX_BYTES else f"cat_i:{index}"
 
 
 def _grid(buttons: list[Button], columns: int = 2) -> list[list[Button]]:
@@ -61,7 +68,10 @@ def _cart_button(lang, cart: list | None) -> list[Button]:
 def categories_kb(categories: list[str], lang: str | None, cart: list | None = None, page: int = 0) -> InlineKeyboardMarkup:
     start = page * CATALOG_PAGE_SIZE
     visible = categories[start:start + CATALOG_PAGE_SIZE]
-    rows = _grid([Button(f"🎮 {category}", callback_data=f"cat:{category}") for category in visible], 1)
+    rows = _grid([
+        Button(f"🎮 {category}", callback_data=category_callback(category, start + offset))
+        for offset, category in enumerate(visible)
+    ], 1)
     pager = _pager("cat_page", page, len(categories), CATALOG_PAGE_SIZE)
     if pager:
         rows.append(pager)

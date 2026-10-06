@@ -66,9 +66,14 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def msg_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = user_language(context, update.effective_user)
+    context.user_data.pop("auth_rate_limited", None)
+    context.user_data.pop("auth_rejection_sent", None)
     if not await require_auth(update, context):
-        await update.message.reply_text(t(lang, "need_signin"))
-        return ConversationHandler.END
+        throttled = context.user_data.pop("auth_rate_limited", False)
+        if not context.user_data.pop("auth_rejection_sent", False):
+            await update.message.reply_text(t(lang, "slow_down" if throttled else "need_signin"))
+        # Keep the conversation open when only throttled, so the customer can resend.
+        return SUPPORT_MESSAGE if throttled else ConversationHandler.END
     text = update.message.text.strip()
     if not text:
         return SUPPORT_MESSAGE
