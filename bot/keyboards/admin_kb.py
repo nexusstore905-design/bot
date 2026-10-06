@@ -1,5 +1,10 @@
 """Inline menus shown in the admin control panel."""
-from telegram import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+try:  # Bot API 7.11+ (python-telegram-bot >= 21.7)
+    from telegram import CopyTextButton
+except ImportError:  # older library on the server: skip the copy button, never crash
+    CopyTextButton = None
 
 
 def admin_main_kb(is_owner: bool = True) -> InlineKeyboardMarkup:
@@ -255,7 +260,7 @@ def supplier_done_error_kb(
 ) -> InlineKeyboardMarkup:
     action_suffix = f"{order_id}:{fulfillment_id}" if fulfillment_id is not None else order_id
     rows = []
-    if player_id:
+    if player_id and CopyTextButton is not None:
         # One tap copies the ID to the clipboard (Telegram copy button, max 256 chars).
         rows.append([InlineKeyboardButton("📋  Copy Player ID", copy_text=CopyTextButton(player_id[:256]))])
     rows.append([
